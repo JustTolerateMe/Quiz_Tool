@@ -1,0 +1,114 @@
+# ── Dependencies ──────────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+vendor/
+venv/
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+.next/
+.nuxt/
+.svelte-kit/
+.output/
+.vercel/
+.netlify/
+target/
+bin/
+obj/
+
+# ── Lock files (redundant with manifests) ─────────────────────────────────────
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+bun.lockb
+Cargo.lock
+poetry.lock
+go.sum
+composer.lock
+Gemfile.lock
+
+# ── Generated / minified ──────────────────────────────────────────────────────
+*.min.js
+*.min.css
+*.map
+*.d.ts.map
+
+# ── Secrets and environment ───────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.env.production
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# ── PWA / service worker generated ───────────────────────────────────────────
+dist/sw.js
+dist/workbox-*
+public/sw.js
+
+# ── IDE and OS noise ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.history/
+
+# ── Large binary assets ───────────────────────────────────────────────────────
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.mp3
+*.wav
+*.ogg
+*.flac
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.dmg
+*.iso
+
+# ── Database files ────────────────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+*.mdb
+
+# ── Test coverage and reports ─────────────────────────────────────────────────
+coverage/
+.nyc_output/
+htmlcov/
+lcov.info
+*.lcov
+test-results/
+playwright-report/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+
+# ── Storybook ────────────────────────────────────────────────────────────────
+storybook-static/
+
+# ── Graphify output ───────────────────────────────────────────────────────────
+graphify-out/

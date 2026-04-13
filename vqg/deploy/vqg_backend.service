@@ -1,0 +1,18 @@
+[Unit]
+Description=VQG FastAPI Backend
+After=network.target redis.service
+
+[Service]
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/vqg
+Environment="PATH=/home/ubuntu/vqg/venv/bin"
+# Ensure production environment variables are loaded
+EnvironmentFile=/home/ubuntu/vqg/.env
+ExecStart=/home/ubuntu/vqg/venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
