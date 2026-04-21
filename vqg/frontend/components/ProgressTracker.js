@@ -9,13 +9,14 @@
  */
 
 const STAGES = [
-  { key: 'QUEUED',      label: 'Queued',                      sub: 'Waiting to start' },
-  { key: 'PARSING',     label: 'Extracting images',           sub: 'Reading PDF pages' },
-  { key: 'TRIAGING',    label: 'Classifying images',          sub: 'Identifying quiz-worthy diagrams' },
-  { key: 'PROCESSING',  label: 'Numbering structures',        sub: 'Replacing labels with numbers' },
-  { key: 'GENERATING',  label: 'Generating questions',        sub: 'Building MCQ distractors' },
-  { key: 'EXPORTING',   label: 'Building Anki deck',          sub: 'Packaging .apkg file' },
-  { key: 'COMPLETE',    label: 'Complete',                    sub: 'Your deck is ready' },
+  { key: 'QUEUED',          label: 'Queued',               sub: 'Waiting to start' },
+  { key: 'PARSING',         label: 'Extracting images',    sub: 'Reading PDF pages' },
+  { key: 'TRIAGING',        label: 'Classifying images',   sub: 'Identifying quiz-worthy diagrams' },
+  { key: 'AWAITING_REVIEW', label: 'Review images',        sub: 'Select which images to quiz' },
+  { key: 'PROCESSING',      label: 'Numbering structures', sub: 'Replacing labels with numbers' },
+  { key: 'GENERATING',      label: 'Generating questions', sub: 'Building MCQ distractors' },
+  { key: 'EXPORTING',       label: 'Building Anki deck',   sub: 'Packaging .apkg file' },
+  { key: 'COMPLETE',        label: 'Complete',             sub: 'Your deck is ready' },
 ]
 
 const STAGE_ORDER = STAGES.map((s) => s.key)

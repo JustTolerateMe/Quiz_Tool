@@ -11,7 +11,7 @@ NANO_BANANA_MODEL: str = os.getenv("NANO_BANANA_MODEL", "gemini-3.1-flash-image-
 REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 STORAGE_PATH: str = os.getenv("STORAGE_PATH", "./storage")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./vqg.db")
-MAX_IMAGES_PER_PDF: int = int(os.getenv("MAX_IMAGES_PER_PDF", "50"))
+MAX_IMAGES_PER_PDF: int = int(os.getenv("MAX_IMAGES_PER_PDF", "300"))
 SSIM_PASS_THRESHOLD: float = float(os.getenv("SSIM_PASS_THRESHOLD", "0.82"))
 # Scale factor for rendering PDF pages before diagram region detection.
 # 2 → crisp enough for Gemini to read labels; crops are saved at this resolution.

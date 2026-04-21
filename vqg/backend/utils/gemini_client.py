@@ -25,7 +25,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-from backend.config import GEMINI_API_KEY, GEMINI_FLASH_MODEL, NANO_BANANA_MODEL
+from backend.config import GEMINI_API_KEY, GEMINI_FLASH_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -160,43 +160,6 @@ def call_vision_text(image_path: str, prompt: str) -> str:
     raise RuntimeError(
         f"call_vision_text failed after 2 attempts for {image_path}: {last_error}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Image editing call (Nano Banana 2 — returns PIL Image or None)
-# ---------------------------------------------------------------------------
-def call_image_edit(image_path: str, instruction: str):
-    """
-    Send an image + editing instruction to Nano Banana 2.
-    Returns a PIL.Image if successful, None if the model returned no image.
-
-    Used by inpainter.py (Week 4). Defined here so all API calls are centralised.
-    """
-    import io
-    from PIL import Image
-
-    image_bytes = Path(image_path).read_bytes()
-    mime_type = _infer_mime_type(image_path)
-
-    _enforce_rate_limit()
-
-    response = _client.models.generate_content(
-        model=NANO_BANANA_MODEL,
-        contents=[
-            instruction,
-            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-        ],
-        config=types.GenerateContentConfig(
-            response_modalities=["IMAGE", "TEXT"]
-        ),
-    )
-
-    for part in response.candidates[0].content.parts:
-        if hasattr(part, "inline_data") and part.inline_data:
-            if part.inline_data.mime_type.startswith("image/"):
-                return Image.open(io.BytesIO(part.inline_data.data))
-
-    return None  # Model returned text only — caller handles fallback
 
 
 # ---------------------------------------------------------------------------

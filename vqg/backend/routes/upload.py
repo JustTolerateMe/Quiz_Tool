@@ -6,7 +6,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend.config import UPLOADS_PATH
 from backend.models.db import create_job
-from backend.workers.celery_app import process_pdf_task
+from backend.workers.celery_app import parse_and_triage_task
 
 router = APIRouter()
 
@@ -31,6 +31,6 @@ async def upload_pdf(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, f)
 
     create_job(job_id, safe_filename)
-    process_pdf_task.delay(job_id, pdf_path, safe_filename)
+    parse_and_triage_task.delay(job_id, pdf_path)
 
     return {"job_id": job_id, "status": "QUEUED"}

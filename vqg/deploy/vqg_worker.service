@@ -5,13 +5,10 @@ After=network.target redis.service vqg_backend.service
 [Service]
 User=ubuntu
 Group=ubuntu
-WorkingDirectory=/home/ubuntu/vqg
-Environment="PATH=/home/ubuntu/vqg/venv/bin"
-# Ensure production RPM limits and env vars are loaded
-EnvironmentFile=/home/ubuntu/vqg/.env
-# concurrency=2 as per rate-limiting requirements
-ExecStart=/home/ubuntu/vqg/venv/bin/celery -A backend.workers.celery_app worker --concurrency=2 --loglevel=info
-
+WorkingDirectory=/home/ubuntu/vqg/vqg
+EnvironmentFile=/home/ubuntu/vqg/vqg/.env
+Environment="PATH=/home/ubuntu/vqg/vqg/venv/bin"
+ExecStart=/home/ubuntu/vqg/vqg/venv/bin/celery -A backend.workers.celery_app worker --pool=solo --loglevel=info
 Restart=always
 RestartSec=5
 

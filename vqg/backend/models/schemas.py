@@ -38,6 +38,7 @@ class JobStatus(str, Enum):
     QUEUED = "QUEUED"
     PARSING = "PARSING"
     TRIAGING = "TRIAGING"
+    AWAITING_REVIEW = "AWAITING_REVIEW"
     PROCESSING = "PROCESSING"
     GENERATING = "GENERATING"
     EXPORTING = "EXPORTING"
@@ -103,6 +104,7 @@ class Job(BaseModel):
     generated_images: int = 0
     quiz_count: int = 0
     export_path: Optional[str] = None
+    html_export_path: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str

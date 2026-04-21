@@ -42,3 +42,7 @@ vqg/storage/
 .claude/
 .gemini/
 .antigravity/
+
+# Dev / test scripts (one-off utilities, not part of pipeline)
+retro_generate_html.py
+tmp_upload_pdf.py

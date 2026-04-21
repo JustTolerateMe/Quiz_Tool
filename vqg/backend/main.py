@@ -2,10 +2,11 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from backend.config import EXPORTS_PATH, IMAGES_PATH, PROCESSED_PATH, UPLOADS_PATH
 from backend.models.db import init_db
-from backend.routes import export, jobs, preview, upload
+from backend.routes import export, jobs, preview, review, upload
 
 app = FastAPI(
     title="VQG — Visual Quiz Generator",
@@ -15,7 +16,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -24,6 +25,10 @@ app.include_router(upload.router)
 app.include_router(jobs.router)
 app.include_router(export.router)
 app.include_router(preview.router)
+app.include_router(review.router)
+
+# Serve storage directory as static files (for HTML study guide diagrams)
+app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
 
 @app.on_event("startup")

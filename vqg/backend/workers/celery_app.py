@@ -1,15 +1,16 @@
 """
 celery_app.py — THE pipeline orchestrator.
 
-This is the only module that calls pipeline functions in sequence.
-FastAPI routes enqueue tasks here; they never call pipeline functions directly.
+Two-phase design (added review step):
+  Phase 1 — parse_and_triage_task:
+    PARSING → TRIAGING → AWAITING_REVIEW  (pauses for user selection)
 
-Pipeline stages:
-  PARSING → TRIAGING → PROCESSING → GENERATING → EXPORTING → COMPLETE
+  Phase 2 — process_and_export_task  (triggered by POST /jobs/{id}/confirm):
+    PROCESSING → GENERATING → EXPORTING → COMPLETE
 
-Parallelism: each stage runs with ThreadPoolExecutor(max_workers=4) so
-Gemini I/O calls overlap. The shared rate limiter in gemini_client.py
-(thread-safe via threading.Lock) caps throughput to GEMINI_RPM_PER_WORKER.
+Parallelism: each stage runs with ThreadPoolExecutor(max_workers=_STAGE_WORKERS).
+The shared rate limiter in gemini_client.py (thread-safe via threading.Lock) caps
+throughput to GEMINI_RPM_PER_WORKER.
 """
 
 import json
@@ -29,6 +30,7 @@ from backend.pipeline.quiz_generator import generate_quiz
 from backend.pipeline.context_mcq_generator import generate_context_mcq
 from backend.pipeline.process_diagram_generator import generate_process_diagram_quiz
 from backend.pipeline.anki_exporter import build_anki_deck
+from backend.pipeline.html_exporter import build_html_export
 from backend.utils.image_utils import draw_numbered_overlay
 
 logger = logging.getLogger(__name__)
@@ -36,18 +38,21 @@ logger = logging.getLogger(__name__)
 app = Celery("vqg", broker=REDIS_URL)
 app.conf.result_expires = 86400  # keep results in Redis 24h
 
-# Number of threads per stage inside a single job. The shared rate limiter
-# in gemini_client.py serialises actual API calls, so this only controls
-# how many images are pre-queued concurrently — not raw throughput.
 _STAGE_WORKERS = 4
+_BATCH_SIZE = 20
 
+
+# ---------------------------------------------------------------------------
+# Phase 1: Parse + Triage → pause at AWAITING_REVIEW
+# ---------------------------------------------------------------------------
 
 @app.task(bind=True, max_retries=0)
-def process_pdf_task(self, job_id: str, pdf_path: str, filename: str) -> None:
+def parse_and_triage_task(self, job_id: str, pdf_path: str) -> None:
     """
-    Full pipeline task for a single PDF upload.
-
-    PARSING → TRIAGING → PROCESSING → GENERATING → EXPORTING → COMPLETE
+    Phase 1: Parse PDF pages, triage each image with Gemini Vision.
+    Saves triage_results.json and sets status to AWAITING_REVIEW.
+    The frontend then shows the user all extracted images to select from.
+    Phase 2 (process_and_export_task) is triggered by POST /jobs/{id}/confirm.
     """
     update_job(job_id, status="PARSING")
 
@@ -55,227 +60,224 @@ def process_pdf_task(self, job_id: str, pdf_path: str, filename: str) -> None:
         # ----------------------------------------------------------------
         # Step 1: Parse PDF → extract/crop diagram regions to disk
         # ----------------------------------------------------------------
-        extracted_images = parse_pdf(pdf_path, job_id)
+        def _parsing_progress(pages_processed: int, total_pages: int, images_extracted: int):
+            update_job(
+                job_id,
+                status=f"PARSING (Page {pages_processed}/{total_pages})",
+                total_images=images_extracted,
+            )
 
+        extracted_images = parse_pdf(pdf_path, job_id, progress_callback=_parsing_progress)
         update_job(job_id, total_images=len(extracted_images), status="TRIAGING")
 
         # ----------------------------------------------------------------
-        # Step 2: Triage each image with Gemini Vision — PARALLEL
+        # Step 2: Triage each image — BATCHED
         # ----------------------------------------------------------------
         def _triage_one(image_data):
-            image_path = image_data["image_path"]
-            triage = triage_image(image_path)
-            if triage is None:
-                logger.info("job %s: skipped %s (triage returned None)", job_id, image_path)
+            try:
+                image_path = image_data["image_path"]
+                triage = triage_image(image_path)
+                if triage is None:
+                    return None
+                route = route_image(triage)
+                if route == "SKIP":
+                    return None
+                return {**image_data, "triage": triage, "route": route}
+            except Exception as e:
+                logger.error("job %s: triage failed for %s: %s", job_id, image_data.get("image_id"), e)
                 return None
-            route = route_image(triage)
-            if route == "SKIP":
-                logger.info(
-                    "job %s: skipped %s (route=SKIP, category=%s)",
-                    job_id, os.path.basename(image_path), triage.get("category"),
-                )
-                return None
-            logger.info(
-                "job %s: triaged %s → %s (%s)",
-                job_id, os.path.basename(image_path), route, triage.get("category"),
-            )
-            return {**image_data, "triage": triage, "route": route}
 
         triaged: list[dict] = []
         skipped = 0
-        with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
-            for result in pool.map(_triage_one, extracted_images):
-                if result is None:
-                    skipped += 1
-                else:
-                    triaged.append(result)
 
-        update_job(job_id, status="PROCESSING")
+        for i in range(0, len(extracted_images), _BATCH_SIZE):
+            batch = extracted_images[i : i + _BATCH_SIZE]
+            with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
+                for result in pool.map(_triage_one, batch):
+                    if result is None:
+                        skipped += 1
+                    else:
+                        triaged.append(result)
+            update_job(job_id, total_images=len(triaged))
 
-        # ----------------------------------------------------------------
-        # Step 3: Process images — LABEL_BLANK get numbered overlay;
-        #         other routes pass through. Order preserved via pool.map().
-        # ----------------------------------------------------------------
-        def _process_one(item):
-            route = item["route"]
-
-            if route == "LABEL_BLANK":
-                image_path = item["image_path"]
-
-                labels = extract_labels(image_path)
-                if labels:
-                    logger.info(
-                        "job %s: extracted %d labels from %s",
-                        job_id, labels.get("total_labels", 0), os.path.basename(image_path),
-                    )
-                else:
-                    logger.info(
-                        "job %s: label extraction failed for %s — overlay will have no numbers",
-                        job_id, os.path.basename(image_path),
-                    )
-
-                img = PILImage.open(image_path).convert("RGB")
-                all_labels = labels.get("labels", []) if labels else []
-                label_list = [
-                    lb for lb in all_labels
-                    if lb.get("label_type", "") != "INLINE_TEXT"
-                ]
-                annotated, label_map = draw_numbered_overlay(img, label_list)
-
-                stem = os.path.splitext(os.path.basename(image_path))[0]
-                numbered_filename = f"{stem}_numbered.png"
-                numbered_path = os.path.join(PROCESSED_PATH, job_id, numbered_filename)
-                os.makedirs(os.path.dirname(numbered_path), exist_ok=True)
-                annotated.save(numbered_path)
-
-                logger.info(
-                    "job %s: numbered overlay saved for %s (%d labels)",
-                    job_id, os.path.basename(image_path), len(label_list),
-                )
-                return ({
-                    **item,
-                    "labels": labels,
-                    "processed_path": numbered_path,
-                    "method": "numbered_overlay",
-                    "ssim": None,
-                    "label_map": label_map,
-                    "_numbered_label_ids": [lb["id"] for lb in label_list],
-                }, 1)
-
-            elif route == "CONTEXT_MCQ":
-                logger.info(
-                    "job %s: CONTEXT_MCQ passthrough for %s",
-                    job_id, os.path.basename(item["image_path"]),
-                )
-                return ({**item, "method": "context_mcq", "processed_path": None}, 0)
-
-            elif route == "SEQUENCE_ORDER":
-                logger.info(
-                    "job %s: SEQUENCE_ORDER passthrough for %s",
-                    job_id, os.path.basename(item["image_path"]),
-                )
-                return ({**item, "method": "process_diagram", "processed_path": None}, 0)
-
-            else:
-                return ({**item, "method": "passthrough", "processed_path": None}, 0)
-
-        results: list[dict] = []
-        processed_count = 0
-        with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
-            for result_item, increment in pool.map(_process_one, triaged):
-                results.append(result_item)
-                processed_count += increment
-        # Single update after processing completes (avoids per-image SQLite writes)
-        update_job(job_id, processed_images=processed_count, status="GENERATING")
-
-        # ----------------------------------------------------------------
-        # Step 4: Generate quiz questions — PARALLEL
-        # ----------------------------------------------------------------
-        def _generate_one(item):
-            route = item["route"]
-
-            if route == "LABEL_BLANK":
-                if not item.get("labels"):
-                    return item, 0
-
-                quiz_image_path = item.get("processed_path") or item["image_path"]
-                questions = generate_quiz(
-                    image_path=quiz_image_path,
-                    labels=item["labels"],
-                    surrounding_text=item.get("surrounding_text", ""),
-                    triage=item["triage"],
-                    target_label_ids=item.get("_numbered_label_ids"),
-                )
-
-                # Rephrase to reference badge number on the diagram
-                if questions and item.get("_numbered_label_ids"):
-                    id_to_box = {
-                        lid: i + 1
-                        for i, lid in enumerate(item["_numbered_label_ids"])
-                    }
-                    for q in questions:
-                        box_num = id_to_box.get(q.get("label_id"))
-                        if box_num:
-                            q["question"] = f"What is structure #{box_num}?"
-
-                item["questions"] = questions
-                logger.info(
-                    "job %s: generated %d questions for %s",
-                    job_id, len(questions), os.path.basename(quiz_image_path),
-                )
-                return item, len(questions)
-
-            elif route == "CONTEXT_MCQ":
-                questions = generate_context_mcq(item["image_path"], item["triage"])
-                item["questions"] = questions
-                logger.info(
-                    "job %s: generated %d context MCQ questions for %s",
-                    job_id, len(questions), os.path.basename(item["image_path"]),
-                )
-                return item, len(questions)
-
-            elif route == "SEQUENCE_ORDER":
-                questions = generate_process_diagram_quiz(
-                    item["image_path"],
-                    item["triage"],
-                    item.get("surrounding_text", ""),
-                )
-                item["questions"] = questions
-                logger.info(
-                    "job %s: generated %d process diagram questions for %s",
-                    job_id, len(questions), os.path.basename(item["image_path"]),
-                )
-                return item, len(questions)
-
-            return item, 0
-
-        quiz_count = 0
-        generated_count = 0
-        with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
-            enriched = list(pool.map(_generate_one, results))
-
-        results = []
-        for result_item, q_count in enriched:
-            results.append(result_item)
-            quiz_count += q_count
-            if q_count > 0:
-                generated_count += 1
-
-        update_job(job_id, generated_images=generated_count, quiz_count=quiz_count)
-
-        # ----------------------------------------------------------------
-        # Save full processing results (now includes questions)
-        # ----------------------------------------------------------------
-        _save_processing_results(job_id, results)
-
-        # ----------------------------------------------------------------
-        # Step 5: Build Anki .apkg deck
-        # ----------------------------------------------------------------
-        update_job(job_id, status="EXPORTING")
-
-        try:
-            export_path = build_anki_deck(results, job_id, filename)
-            update_job(job_id, export_path=export_path)
-        except ValueError as e:
-            # No questions generated — still complete, just no deck
-            logger.warning("job %s: no cards to export — %s", job_id, e)
-            export_path = None
+        # Save triage results for Phase 2 and for the review endpoint
+        _save_triage_results(job_id, triaged)
 
         update_job(
             job_id,
-            status="COMPLETE",
-            processed_images=processed_count,
+            status="AWAITING_REVIEW",
+            total_images=len(triaged),
             skipped_images=skipped,
-            quiz_count=quiz_count,
         )
         logger.info(
-            "job %s: COMPLETE — %d processed, %d skipped, %d questions, export=%s",
-            job_id, processed_count, skipped, quiz_count,
-            os.path.basename(export_path) if export_path else "none",
+            "job %s: AWAITING_REVIEW — %d images ready for selection (%d skipped)",
+            job_id, len(triaged), skipped,
         )
 
     except Exception as exc:
-        logger.exception("job %s: FAILED — %s", job_id, exc)
+        logger.exception("job %s: FAILED in Phase 1 — %s", job_id, exc)
+        update_job(job_id, status="FAILED", error=str(exc))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Process + Generate + Export (triggered by user confirmation)
+# ---------------------------------------------------------------------------
+
+@app.task(bind=True, max_retries=0)
+def process_and_export_task(
+    self, job_id: str, filename: str, selected_ids: list
+) -> None:
+    """
+    Phase 2: Process and generate questions for user-selected images only.
+    Called by POST /jobs/{id}/confirm after user reviews triage results.
+    """
+    update_job(job_id, status="PROCESSING")
+
+    try:
+        # Load triage results and filter to selected images
+        triage_path = os.path.join(PROCESSED_PATH, job_id, "triage_results.json")
+        with open(triage_path, "r", encoding="utf-8") as f:
+            all_triaged = json.load(f)
+
+        selected_set = set(selected_ids)
+        triaged = [item for item in all_triaged if item["image_id"] in selected_set]
+
+        update_job(job_id, total_images=len(triaged), processed_images=0, generated_images=0, quiz_count=0)
+        logger.info("job %s: Phase 2 starting — %d/%d images selected", job_id, len(triaged), len(all_triaged))
+
+        # ----------------------------------------------------------------
+        # Step 3: Process images — BATCHED
+        # ----------------------------------------------------------------
+        def _process_one(item):
+            try:
+                route = item["route"]
+                if route == "LABEL_BLANK":
+                    image_path = item["image_path"]
+                    labels = extract_labels(image_path)
+
+                    img = PILImage.open(image_path).convert("RGB")
+                    all_labels = labels.get("labels", []) if labels else []
+                    label_list = [lb for lb in all_labels if lb.get("label_type", "") != "INLINE_TEXT"]
+
+                    annotated, label_map = draw_numbered_overlay(img, label_list)
+
+                    stem = os.path.splitext(os.path.basename(image_path))[0]
+                    numbered_filename = f"{stem}_numbered.png"
+                    numbered_path = os.path.join(PROCESSED_PATH, job_id, numbered_filename)
+                    os.makedirs(os.path.dirname(numbered_path), exist_ok=True)
+                    annotated.save(numbered_path)
+                    img.close()
+
+                    return ({
+                        **item,
+                        "labels": labels,
+                        "processed_path": numbered_path,
+                        "method": "numbered_overlay",
+                        "label_map": label_map,
+                        "_numbered_label_ids": [lb["id"] for lb in label_list],
+                    }, 1)
+
+                elif route == "CONTEXT_MCQ":
+                    return ({**item, "method": "context_mcq", "processed_path": None}, 0)
+                elif route == "SEQUENCE_ORDER":
+                    return ({**item, "method": "process_diagram", "processed_path": None}, 0)
+                else:
+                    return ({**item, "method": "passthrough", "processed_path": None}, 0)
+            except Exception as e:
+                logger.error("job %s: processing failed for %s: %s", job_id, item.get("image_id"), e)
+                return (None, 0)
+
+        results: list[dict] = []
+        processed_count = 0
+
+        for i in range(0, len(triaged), _BATCH_SIZE):
+            batch = triaged[i : i + _BATCH_SIZE]
+            with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
+                for result_item, increment in pool.map(_process_one, batch):
+                    if result_item:
+                        results.append(result_item)
+                        processed_count += increment
+            update_job(job_id, processed_images=processed_count)
+
+        update_job(job_id, status="GENERATING", processed_images=processed_count)
+
+        # ----------------------------------------------------------------
+        # Step 4: Generate quiz questions — BATCHED
+        # ----------------------------------------------------------------
+        def _generate_one(item):
+            try:
+                route = item["route"]
+                if route == "LABEL_BLANK":
+                    if not item.get("labels"):
+                        return item, 0
+                    quiz_image_path = item.get("processed_path") or item["image_path"]
+                    questions = generate_quiz(
+                        image_path=quiz_image_path,
+                        labels=item["labels"],
+                        surrounding_text=item.get("surrounding_text", ""),
+                        triage=item["triage"],
+                        target_label_ids=item.get("_numbered_label_ids"),
+                    )
+                    if questions and item.get("_numbered_label_ids"):
+                        id_to_box = {lid: idx + 1 for idx, lid in enumerate(item["_numbered_label_ids"])}
+                        for q in questions:
+                            box_num = id_to_box.get(q.get("label_id"))
+                            if box_num:
+                                q["question"] = f"What is structure #{box_num}?"
+                    item["questions"] = questions
+                    return item, len(questions)
+
+                elif route == "CONTEXT_MCQ":
+                    questions = generate_context_mcq(item["image_path"], item["triage"])
+                    item["questions"] = questions
+                    return item, len(questions)
+
+                elif route == "SEQUENCE_ORDER":
+                    questions = generate_process_diagram_quiz(
+                        item["image_path"], item["triage"], item.get("surrounding_text", "")
+                    )
+                    item["questions"] = questions
+                    return item, len(questions)
+
+                return item, 0
+            except Exception as e:
+                logger.error("job %s: generation failed for %s: %s", job_id, item.get("image_id"), e)
+                return item, 0
+
+        enriched: list[dict] = []
+        quiz_count = 0
+        generated_count = 0
+
+        for i in range(0, len(results), _BATCH_SIZE):
+            batch = results[i : i + _BATCH_SIZE]
+            with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
+                batch_results = list(pool.map(_generate_one, batch))
+            for res_item, q_count in batch_results:
+                enriched.append(res_item)
+                quiz_count += q_count
+                if q_count > 0:
+                    generated_count += 1
+            update_job(job_id, generated_images=generated_count, quiz_count=quiz_count)
+
+        _save_processing_results(job_id, enriched)
+
+        # ----------------------------------------------------------------
+        # Step 5: Build Anki deck + HTML study guide
+        # ----------------------------------------------------------------
+        update_job(job_id, status="EXPORTING")
+        try:
+            export_path = build_anki_deck(enriched, job_id, filename)
+            html_path = build_html_export(enriched, job_id, filename)
+            update_job(job_id, export_path=export_path, html_export_path=html_path)
+        except ValueError as e:
+            logger.warning("job %s: no cards to export — %s", job_id, e)
+
+        update_job(job_id, status="COMPLETE")
+        logger.info("job %s: COMPLETE — %d questions from %d images", job_id, quiz_count, len(triaged))
+
+    except Exception as exc:
+        logger.exception("job %s: FAILED in Phase 2 — %s", job_id, exc)
         update_job(job_id, status="FAILED", error=str(exc))
         raise
 
@@ -284,17 +286,24 @@ def process_pdf_task(self, job_id: str, pdf_path: str, filename: str) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _save_processing_results(job_id: str, results: list) -> None:
-    """
-    Persist full processing results as JSON.
-    Saved to storage/processed/{job_id}/processing_results.json
-    """
-    job_processed_dir = os.path.join(PROCESSED_PATH, job_id)
-    os.makedirs(job_processed_dir, exist_ok=True)
-    output_path = os.path.join(job_processed_dir, "processing_results.json")
+def _save_triage_results(job_id: str, triaged: list) -> None:
+    job_dir = os.path.join(PROCESSED_PATH, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    path = os.path.join(job_dir, "triage_results.json")
     try:
-        with open(output_path, "w", encoding="utf-8") as f:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(triaged, f, indent=2, default=str)
+        logger.info("job %s: triage results saved (%d images)", job_id, len(triaged))
+    except Exception as e:
+        logger.warning("job %s: could not save triage results: %s", job_id, e)
+
+
+def _save_processing_results(job_id: str, results: list) -> None:
+    job_dir = os.path.join(PROCESSED_PATH, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    path = os.path.join(job_dir, "processing_results.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(results, f, indent=2, default=str)
-        logger.info("job %s: processing results saved to %s", job_id, output_path)
     except Exception as e:
         logger.warning("job %s: could not save processing results: %s", job_id, e)

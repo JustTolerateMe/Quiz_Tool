@@ -19,10 +19,14 @@ export default function ResultsPage() {
   const router = useRouter()
   const { jobId } = router.query
 
-  const [job, setJob]           = useState(null)
-  const [fetchError, setFetchError] = useState('')
-  const [preview, setPreview]   = useState(null)
-  const intervalRef = useRef(null)
+  const [job, setJob]                 = useState(null)
+  const [fetchError, setFetchError]   = useState('')
+  const [preview, setPreview]         = useState(null)
+  const [triageData, setTriageData]   = useState(null)
+  const [selectedIds, setSelectedIds] = useState(new Set())
+  const [confirming, setConfirming]   = useState(false)
+  const intervalRef    = useRef(null)
+  const triageLoadedRef = useRef(false)
 
   useEffect(() => {
     if (!jobId) return
@@ -41,9 +45,24 @@ export default function ResultsPage() {
         const data = await res.json()
         setJob(data)
         setFetchError('')
+
+        // Fetch triage data once when review stage is reached
+        if (data.status === 'AWAITING_REVIEW' && !triageLoadedRef.current) {
+          triageLoadedRef.current = true
+          try {
+            const tr = await fetch(`${API_URL}/jobs/${jobId}/triage-review`)
+            if (tr.ok) {
+              const td = await tr.json()
+              setTriageData(td)
+              setSelectedIds(new Set(td.images.map(i => i.image_id)))
+            } else {
+              triageLoadedRef.current = false // retry on next poll if fetch failed
+            }
+          } catch (_) { triageLoadedRef.current = false }
+        }
+
         if (TERMINAL_STATUSES.has(data.status)) {
           clearInterval(intervalRef.current)
-          // Fetch preview once job is complete
           if (data.status === 'COMPLETE') {
             try {
               const pr = await fetch(`${API_URL}/jobs/${jobId}/preview`)
@@ -65,9 +84,35 @@ export default function ResultsPage() {
     window.location.href = `${API_URL}/export/${jobId}/anki`
   }
 
-  const isComplete = job?.status === 'COMPLETE'
-  const isFailed   = job?.status === 'FAILED'
-  const hasExport  = isComplete && job?.export_path
+  const handleHtmlDownload = () => {
+    window.location.href = `${API_URL}/export/${jobId}/html`
+  }
+
+  const handleConfirm = async () => {
+    if (confirming || selectedIds.size === 0) return
+    setConfirming(true)
+    try {
+      await fetch(`${API_URL}/jobs/${jobId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected_ids: [...selectedIds] }),
+      })
+    } catch (_) { setConfirming(false) }
+  }
+
+  const toggleImage = (imageId) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      next.has(imageId) ? next.delete(imageId) : next.add(imageId)
+      return next
+    })
+  }
+
+  const isComplete       = job?.status === 'COMPLETE'
+  const isFailed         = job?.status === 'FAILED'
+  const isAwaitingReview = job?.status === 'AWAITING_REVIEW'
+  const hasExport        = isComplete && job?.export_path
+  const hasHtmlExport    = isComplete && job?.html_export_path
   const title = job ? `${job.pdf_filename} — VQG` : 'Processing… — VQG'
 
   return (
@@ -173,6 +218,28 @@ export default function ResultsPage() {
                 />
               </div>
 
+              {/* Review — image selection */}
+              {isAwaitingReview && triageData && (
+                <ImageReview
+                  images={triageData.images}
+                  selectedIds={selectedIds}
+                  onToggle={toggleImage}
+                  onSelectAll={() => setSelectedIds(new Set(triageData.images.map(i => i.image_id)))}
+                  onDeselectAll={() => setSelectedIds(new Set())}
+                  onConfirm={handleConfirm}
+                  confirming={confirming}
+                  apiUrl={API_URL}
+                />
+              )}
+
+              {/* Review — loading triage data */}
+              {isAwaitingReview && !triageData && (
+                <div className="bg-white rounded-2xl border border-slate-200 shadow-sm px-6 py-8 text-center">
+                  <div className="animate-spin w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full mx-auto mb-3" />
+                  <p className="text-sm text-slate-500">Loading extracted images…</p>
+                </div>
+              )}
+
               {/* Complete — download */}
               {isComplete && hasExport && (
                 <div className="bg-emerald-50 border border-emerald-100 rounded-2xl px-6 py-5">
@@ -198,6 +265,17 @@ export default function ResultsPage() {
                     </svg>
                     Download vqg_{jobId.slice(0, 8)}.apkg
                   </button>
+                  {hasHtmlExport && (
+                    <button
+                      onClick={handleHtmlDownload}
+                      className="w-full mt-2 py-3 px-4 rounded-xl border border-indigo-200 hover:bg-indigo-50 active:scale-[0.98] text-indigo-700 font-semibold text-sm transition-all flex items-center justify-center gap-2"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 21a9.004 9.004 0 008.716-6.747M12 21a9.004 9.004 0 01-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 017.843 4.582M12 3a8.997 8.997 0 00-7.843 4.582m15.686 0A11.953 11.953 0 0112 10.5c-2.998 0-5.74-1.1-7.843-2.918m15.686 0A8.959 8.959 0 0121 12c0 .778-.099 1.533-.284 2.253m0 0A17.919 17.919 0 0112 16.5c-3.162 0-6.133-.815-8.716-2.247m0 0A9.015 9.015 0 013 12c0-1.605.42-3.113 1.157-4.418" />
+                      </svg>
+                      Open HTML Study Guide
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -365,6 +443,113 @@ function Stat({ label, value, highlight }) {
     <div className="text-center">
       <p className={`text-xl font-bold ${highlight ? 'text-indigo-600' : 'text-slate-900'}`}>{value}</p>
       <p className="text-xs text-slate-400 mt-0.5">{label}</p>
+    </div>
+  )
+}
+
+const ROUTE_BADGE = {
+  LABEL_BLANK:    'bg-indigo-50 text-indigo-700',
+  CONTEXT_MCQ:    'bg-amber-50 text-amber-700',
+  SEQUENCE_ORDER: 'bg-emerald-50 text-emerald-700',
+}
+
+const ROUTE_LABEL = {
+  LABEL_BLANK:    'Label',
+  CONTEXT_MCQ:    'Concept',
+  SEQUENCE_ORDER: 'Sequence',
+}
+
+function ImageReview({ images, selectedIds, onToggle, onSelectAll, onDeselectAll, onConfirm, confirming, apiUrl }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+      {/* Header */}
+      <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-slate-900">Select images to quiz</p>
+          <p className="text-xs text-slate-400 mt-0.5">
+            {images.length} image{images.length !== 1 ? 's' : ''} found · {selectedIds.size} selected
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={onSelectAll}
+            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+          >
+            All
+          </button>
+          <span className="text-slate-200">|</span>
+          <button
+            onClick={onDeselectAll}
+            className="text-xs text-slate-500 hover:text-slate-700 font-medium"
+          >
+            None
+          </button>
+        </div>
+      </div>
+
+      {/* Image grid */}
+      <div className="p-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+        {images.map((img) => {
+          const selected = selectedIds.has(img.image_id)
+          return (
+            <div
+              key={img.image_id}
+              onClick={() => onToggle(img.image_id)}
+              className={`relative rounded-xl border-2 cursor-pointer transition-all overflow-hidden
+                ${selected ? 'border-indigo-500 shadow-md' : 'border-slate-200 opacity-50'}`}
+            >
+              {/* Thumbnail */}
+              <div className="bg-slate-100 aspect-[4/3] overflow-hidden">
+                <img
+                  src={`${apiUrl}${img.thumbnail_url}`}
+                  alt={img.image_id}
+                  className="w-full h-full object-contain"
+                />
+              </div>
+
+              {/* Badges row */}
+              <div className="px-2 py-1.5 flex items-center justify-between gap-1">
+                <span className="text-xs text-slate-400">p.{img.page_number ?? '?'}</span>
+                <span className={`text-xs font-semibold px-1.5 py-0.5 rounded-full ${ROUTE_BADGE[img.route] || 'bg-slate-100 text-slate-500'}`}>
+                  {ROUTE_LABEL[img.route] || img.route}
+                </span>
+              </div>
+
+              {/* Description */}
+              {img.description && (
+                <p className="px-2 pb-2 text-xs text-slate-500 truncate">{img.description}</p>
+              )}
+
+              {/* Checkmark */}
+              {selected && (
+                <div className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center">
+                  <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Confirm button */}
+      <div className="px-4 pb-4">
+        <button
+          onClick={onConfirm}
+          disabled={confirming || selectedIds.size === 0}
+          className="w-full py-3 px-4 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98] text-white font-semibold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
+        >
+          {confirming ? (
+            <>
+              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              Starting…
+            </>
+          ) : (
+            <>Generate questions for {selectedIds.size} image{selectedIds.size !== 1 ? 's' : ''}</>
+          )}
+        </button>
+      </div>
     </div>
   )
 }

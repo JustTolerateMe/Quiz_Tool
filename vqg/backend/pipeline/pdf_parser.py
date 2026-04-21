@@ -15,6 +15,7 @@ Output filenames: page{N:03d}_region{M}.png  (1-indexed M per page)
 Fallback (Gemini failure or empty page): page{N:03d}_region0.png (full page)
 """
 
+import concurrent.futures
 import logging
 import os
 
@@ -54,104 +55,117 @@ Rules:
 - Coordinates origin is top-left; x goes left→right, y goes top→bottom"""
 
 
-def parse_pdf(pdf_path: str, job_id: str) -> list[dict]:
+def parse_pdf(pdf_path: str, job_id: str, progress_callback=None) -> list[dict]:
     """
-    Parse a PDF and extract all quiz-worthy diagram regions.
-
-    For each page:
-      1. Render at PAGE_RENDER_SCALE (default 2×)
-      2. Ask Gemini Vision to identify diagram bounding boxes
-      3. Crop each region (with margin) and save to disk
-      4. Fallback: if Gemini fails, save the full rendered page as one region
-
+    Parse a PDF and extract all quiz-worthy diagram regions, parallelised.
+    
     Args:
         pdf_path: Absolute path to the uploaded PDF file.
         job_id:   Unique job identifier — images saved under IMAGES_PATH/{job_id}/
-
-    Returns:
-        List of dicts with keys:
-            image_id           — filename e.g. page003_region1.png
-            image_path         — absolute save path
-            page_number        — 0-indexed page number
-            surrounding_text   — up to 500 chars of PDF text from the same page
-            region_description — Gemini's description of what the figure shows
-            has_labels         — bool, whether Gemini detected callout labels
+        progress_callback: Optional callable(pages_processed, total_pages, extracted_count)
     """
     job_images_dir = os.path.join(IMAGES_PATH, job_id)
     os.makedirs(job_images_dir, exist_ok=True)
 
     doc = fitz.open(pdf_path)
-    logger.info("Opened PDF '%s' — %d pages (job %s)", os.path.basename(pdf_path), len(doc), job_id)
+    total_pages = len(doc)
+    doc.close()
 
-    extracted: list[dict] = []
-    seen_pages: set[int] = set()
+    logger.info("Opened PDF '%s' — %d pages (job %s)", os.path.basename(pdf_path), total_pages, job_id)
 
-    for page_num in range(len(doc)):
-        if len(extracted) >= MAX_IMAGES_PER_PDF:
-            logger.info("job %s: hit MAX_IMAGES_PER_PDF cap (%d)", job_id, MAX_IMAGES_PER_PDF)
-            break
+    extracted_by_page = {}
+    pages_processed = 0
 
-        if page_num in seen_pages:
-            continue
-        seen_pages.add(page_num)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        batch_size = 10
+        for i in range(0, total_pages, batch_size):
+            batch_pages = list(range(i, min(i + batch_size, total_pages)))
 
+            future_to_page = {
+                pool.submit(_process_single_page, pdf_path, p, job_id, job_images_dir): p
+                for p in batch_pages
+            }
+
+            for future in concurrent.futures.as_completed(future_to_page):
+                page_num = future_to_page[future]
+                pages_processed += 1
+                try:
+                    page_results = future.result()
+                    extracted_by_page[page_num] = page_results
+                except Exception as e:
+                    logger.error("job %s: error processing page %d: %s", job_id, page_num, e)
+                    extracted_by_page[page_num] = []
+
+                if progress_callback:
+                    current_images = sum(len(res) for res in extracted_by_page.values())
+                    progress_callback(pages_processed, total_pages, current_images)
+
+            # Check limit after each batch
+            current_images = sum(len(res) for res in extracted_by_page.values())
+            if current_images >= MAX_IMAGES_PER_PDF:
+                logger.info("job %s: hit MAX_IMAGES_PER_PDF cap (%d)", job_id, MAX_IMAGES_PER_PDF)
+                break
+
+    # Reassemble in exact page order
+    extracted = []
+    for p in range(total_pages):
+        if p in extracted_by_page:
+            extracted.extend(extracted_by_page[p])
+            if len(extracted) >= MAX_IMAGES_PER_PDF:
+                extracted = extracted[:MAX_IMAGES_PER_PDF]
+                break
+
+    logger.info("job %s: extracted %d regions total", job_id, len(extracted))
+    return extracted
+
+
+def _process_single_page(pdf_path: str, page_num: int, job_id: str, job_images_dir: str) -> list[dict]:
+    # Need to reopen doc inside worker thread (PyMuPDF `doc` is not thread-safe)
+    doc = fitz.open(pdf_path)
+    try:
         page = doc[page_num]
         surrounding_text = page.get_text()[:500]
 
-        # Step 1: Render the full page
         mat = fitz.Matrix(PAGE_RENDER_SCALE, PAGE_RENDER_SCALE)
         pix = page.get_pixmap(matrix=mat, alpha=False)
-
-        try:
-            pil_page = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        except Exception as e:
-            logger.warning("job %s: pixmap→PIL failed for page %d: %s", job_id, page_num, e)
-            continue
-
+        pil_page = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         w, h = pil_page.size
+    except Exception as e:
+        logger.warning("job %s: pixmap→PIL failed for page %d: %s", job_id, page_num, e)
+        return []
+    finally:
+        doc.close()
 
-        # Save full-page render to a temp file for Gemini
-        temp_path = os.path.join(job_images_dir, f"_tmp_page{page_num:03d}.png")
-        try:
-            pil_page.save(temp_path)
-        except Exception as e:
-            logger.warning("job %s: could not save temp render for page %d: %s", job_id, page_num, e)
+    temp_path = os.path.join(job_images_dir, f"_tmp_page{page_num:03d}.png")
+    try:
+        pil_page.save(temp_path)
+    except Exception as e:
+        logger.warning("job %s: could not save temp render for page %d: %s", job_id, page_num, e)
+        return []
+
+    regions = _detect_regions(temp_path, page_num, job_id)
+
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+
+    if not regions:
+        logger.debug("job %s: page %d — no quizzable regions detected", job_id, page_num)
+        return []
+
+    extracted_for_page = []
+    for region_idx, region in enumerate(regions, start=1):
+        crop = _crop_region(pil_page, region, w, h)
+        if crop is None:
             continue
 
-        # Step 2: Ask Gemini where the diagrams are
-        regions = _detect_regions(temp_path, page_num, job_id)
+        img_filename = f"page{page_num:03d}_region{region_idx}.png"
+        img_path = os.path.join(job_images_dir, img_filename)
 
-        # Clean up temp file
         try:
-            os.remove(temp_path)
-        except OSError:
-            pass
-
-        # Step 3: Crop and save each region
-        if not regions:
-            # No diagrams on this page — skip (text-only page)
-            logger.info("job %s: page %d — no quizzable regions detected", job_id, page_num)
-            continue
-
-        for region_idx, region in enumerate(regions, start=1):
-            if len(extracted) >= MAX_IMAGES_PER_PDF:
-                break
-
-            crop = _crop_region(pil_page, region, w, h)
-            if crop is None:
-                continue
-
-            img_filename = f"page{page_num:03d}_region{region_idx}.png"
-            img_path = os.path.join(job_images_dir, img_filename)
-
-            try:
-                crop.save(img_path)
-            except Exception as e:
-                logger.warning("job %s: could not save crop for page %d region %d: %s",
-                               job_id, page_num, region_idx, e)
-                continue
-
-            extracted.append({
+            crop.save(img_path)
+            extracted_for_page.append({
                 "image_id": img_filename,
                 "image_path": img_path,
                 "page_number": page_num,
@@ -161,12 +175,15 @@ def parse_pdf(pdf_path: str, job_id: str) -> list[dict]:
             })
             logger.debug(
                 "job %s: page %d region %d saved → %s (%dx%d)",
-                job_id, page_num, region_idx, img_filename, *crop.size,
+                job_id, page_num, region_idx, img_filename, w, h
             )
+        except Exception as e:
+            logger.warning("job %s: could not save crop for page %d region %d: %s",
+                           job_id, page_num, region_idx, e)
 
-    doc.close()
-    logger.info("job %s: extracted %d regions total", job_id, len(extracted))
-    return extracted
+    # Free memory
+    pil_page.close()
+    return extracted_for_page
 
 
 # ---------------------------------------------------------------------------
