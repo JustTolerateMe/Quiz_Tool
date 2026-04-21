@@ -28,7 +28,7 @@ apt-get upgrade -y -qq
 
 echo "--- Installing system dependencies ---"
 apt-get install -y -qq \
-    python3.11 python3.11-venv python3-pip \
+    python3 python3-venv python3-pip \
     redis-server nginx git \
     build-essential curl ufw
 
@@ -62,7 +62,7 @@ chown -R ubuntu:ubuntu "$APP_DIR"
 # ─────────────────────────────────────────────
 echo "--- Setting up Python venv ---"
 cd "$DEPLOY_DIR"
-python3.11 -m venv venv
+python3 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip -q
 pip install -r requirements.txt -q
