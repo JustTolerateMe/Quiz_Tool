@@ -30,6 +30,7 @@ def init_db() -> None:
             quiz_count       INTEGER NOT NULL DEFAULT 0,
             export_path      TEXT,
             html_export_path TEXT,
+            pdf_export_path  TEXT,
             error            TEXT,
             created_at       TEXT NOT NULL,
             updated_at       TEXT NOT NULL
@@ -42,6 +43,10 @@ def init_db() -> None:
         pass  # Column already exists
     try:
         conn.execute("ALTER TABLE jobs ADD COLUMN html_export_path TEXT")
+    except Exception:
+        pass  # Column already exists
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN pdf_export_path TEXT")
     except Exception:
         pass  # Column already exists
     conn.commit()
@@ -77,7 +82,7 @@ def get_job(job_id: str) -> Optional[dict]:
     row = conn.execute("""
         SELECT job_id, status, pdf_filename, total_images, processed_images,
                skipped_images, generated_images, quiz_count, export_path,
-               html_export_path, error, created_at, updated_at
+               html_export_path, pdf_export_path, error, created_at, updated_at
         FROM jobs WHERE job_id = ?
     """, (job_id,)).fetchone()
     conn.close()
@@ -86,6 +91,6 @@ def get_job(job_id: str) -> Optional[dict]:
     cols = [
         "job_id", "status", "pdf_filename", "total_images", "processed_images",
         "skipped_images", "generated_images", "quiz_count", "export_path",
-        "html_export_path", "error", "created_at", "updated_at",
+        "html_export_path", "pdf_export_path", "error", "created_at", "updated_at",
     ]
     return dict(zip(cols, row))

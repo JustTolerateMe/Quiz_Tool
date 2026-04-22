@@ -57,3 +57,22 @@ async def download_html(job_id: str):
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/export/{job_id}/pdf")
+async def download_pdf(job_id: str):
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "COMPLETE":
+        raise HTTPException(status_code=409, detail="Job not complete")
+    if not job.get("pdf_export_path"):
+        raise HTTPException(status_code=404, detail="PDF export not available for this job")
+    path = os.path.normpath(job["pdf_export_path"])
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="PDF file missing on disk")
+    return FileResponse(
+        path,
+        filename=f"quiz_cards_{job_id[:8]}.pdf",
+        media_type="application/pdf",
+    )

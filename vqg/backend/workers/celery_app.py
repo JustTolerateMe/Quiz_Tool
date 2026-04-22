@@ -31,6 +31,7 @@ from backend.pipeline.context_mcq_generator import generate_context_mcq
 from backend.pipeline.process_diagram_generator import generate_process_diagram_quiz
 from backend.pipeline.anki_exporter import build_anki_deck
 from backend.pipeline.html_exporter import build_html_export
+from backend.pipeline.pdf_exporter import build_pdf_export
 from backend.utils.image_utils import draw_numbered_overlay
 
 logger = logging.getLogger(__name__)
@@ -269,7 +270,8 @@ def process_and_export_task(
         try:
             export_path = build_anki_deck(enriched, job_id, filename)
             html_path = build_html_export(enriched, job_id, filename)
-            update_job(job_id, export_path=export_path, html_export_path=html_path)
+            pdf_path = build_pdf_export(enriched, job_id, filename)
+            update_job(job_id, export_path=export_path, html_export_path=html_path, pdf_export_path=pdf_path)
         except ValueError as e:
             logger.warning("job %s: no cards to export — %s", job_id, e)
 

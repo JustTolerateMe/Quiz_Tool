@@ -105,6 +105,7 @@ class Job(BaseModel):
     quiz_count: int = 0
     export_path: Optional[str] = None
     html_export_path: Optional[str] = None
+    pdf_export_path: Optional[str] = None
     error: Optional[str] = None
     created_at: str
     updated_at: str
