@@ -25,6 +25,161 @@ TEMPLATE — copy this block for each entry:
 ---
 -->
 
+## 2026-04-22 — Hetzner Cloud deployment (live at http://178.104.251.221)
+
+**What was added/changed:**
+- VQG deployed to Hetzner CX33 server (4 vCPU, 8GB RAM, Ubuntu 24.04, Nuremberg EU).
+- Three systemd services running 24/7: `vqg_backend` (FastAPI), `vqg_worker` (Celery), `vqg_frontend` (Next.js).
+- Nginx reverse proxy on port 80: API routes (`/upload`, `/jobs`, `/export`, `/preview`, `/health`, `/storage`) → FastAPI on 8000; everything else → Next.js on 3000.
+- System Redis (port 6379) replaces Docker Redis used in local dev.
+- `NEXT_PUBLIC_API_URL` baked in at build time using server's detected public IP.
+
+**How it works:**
+- `vqg/deploy/setup_vm.sh` does the full one-shot setup: installs deps, clones repo, creates venv, builds frontend, writes `.env`, installs systemd services, configures nginx + UFW.
+- All services auto-restart on failure (`Restart=always`) and start on boot.
+- Celery worker runs with `--pool=solo` — avoids Windows billiard `DuplicateHandle` bug (also fine on Linux; tasks use internal `ThreadPoolExecutor` for parallelism anyway).
+
+**Files affected:**
+- `vqg/deploy/setup_vm.sh` — full rewrite for Hetzner Ubuntu (was Oracle-specific)
+- `vqg/deploy/nginx_vqg.conf` — updated to route both frontend and backend
+- `vqg/deploy/vqg_backend.service` — fixed paths for Hetzner layout
+- `vqg/deploy/vqg_worker.service` — added `--pool=solo`
+- `vqg/deploy/vqg_frontend.service` — NEW: Next.js systemd service
+
+**Known issues / next steps:**
+- No domain yet — running on raw IP. When domain is added, run Certbot for HTTPS.
+- No automated backups enabled — can add from Hetzner dashboard (+20% cost).
+- SSH key lives at `C:\Users\anshu\AppData\Roaming\SPB_Data\.ssh\vqg_hetzner`.
+
+---
+
+## 2026-04-21 — Celery worker crash fix (Windows billiard PermissionError)
+
+**What was added/changed:**
+- Fixed all jobs stuck in QUEUED: Celery worker was silently crashing on every task with `PermissionError: [WinError 5] Access is denied` inside billiard's `DuplicateHandle` call.
+- Fix: run worker with `--pool=solo` instead of default prefork pool.
+
+**How it works:**
+- Celery's default prefork pool spawns subprocess workers using billiard (a fork of Python multiprocessing). On Windows, billiard calls `DuplicateHandle` to share pipe handles between parent and child processes — this gets denied in certain environments (antivirus, restricted shell, VSCode terminal).
+- `--pool=solo` runs tasks directly in the main process with no subprocess spawning. Safe here because all task-level parallelism already happens inside `ThreadPoolExecutor`.
+
+**Files affected:**
+- `vqg/deploy/vqg_worker.service` — added `--pool=solo`
+
+**Known issues / next steps:**
+- Local dev: always start worker with `celery -A backend.workers.celery_app worker --pool=solo --loglevel=info`
+
+---
+
+## 2026-04-20 — Cloudflare Tunnel public sharing + stale closure bug fix
+
+**What was added/changed:**
+- Cloudflare Tunnel set up to expose the app publicly without deployment — frontend at a `trycloudflare.com` URL, backend at a separate tunnel URL.
+- `frontend/.env.local` created with `NEXT_PUBLIC_API_URL` pointing to the backend tunnel URL so the frontend API calls route correctly in production.
+- CORS config in `main.py` updated to allow the frontend tunnel origin alongside localhost.
+- Fixed stale closure bug in results page: `triageData` state was captured as `null` in the polling closure, causing triage data to be re-fetched every 2.5s and resetting all checkboxes. Fixed by replacing the state check with a `triageLoadedRef` ref that persists correctly across renders.
+
+**How it works:**
+- Cloudflare Tunnel creates an outbound-only encrypted tunnel from localhost to Cloudflare's edge — no port forwarding, no firewall changes needed.
+- Two tunnels run simultaneously: one for FastAPI (:8000), one for Next.js (:3000).
+- The frontend reads `NEXT_PUBLIC_API_URL` at build time from `.env.local` — requires `npm run dev` restart when changed.
+- The `triageLoadedRef` ref is set to `true` on first successful triage fetch; subsequent poll ticks skip the fetch entirely regardless of React re-renders.
+
+**Files affected:**
+- `vqg/frontend/.env.local` — NEW: sets `NEXT_PUBLIC_API_URL` to backend tunnel URL
+- `vqg/backend/main.py` — added frontend tunnel origin to CORS allow list
+- `vqg/frontend/pages/results/[jobId].js` — replaced `!triageData` closure check with `triageLoadedRef`
+
+**Known issues / next steps:**
+- Tunnel URLs change every session (trycloudflare.com generates random names) — `.env.local` and CORS config need updating each time. For persistent URLs, deploy to Hetzner or use a paid Cloudflare tunnel with a fixed domain.
+- Tunnels only work while the cloudflared process and the local servers are running.
+
+---
+
+## 2026-04-19 — Image selection review step
+
+**What was added/changed:**
+- Pipeline now pauses after triage at a new `AWAITING_REVIEW` status, letting the user see every extracted image and choose which ones to generate questions for.
+- Celery task split into two: `parse_and_triage_task` (Phase 1: parse + triage) and `process_and_export_task` (Phase 2: process + generate + export).
+- `GET /jobs/{id}/triage-review` — returns all triaged images with thumbnails, page numbers, and route classification (LABEL_BLANK / CONTEXT_MCQ / SEQUENCE_ORDER).
+- `POST /jobs/{id}/confirm` — accepts `selected_ids` list, fires Phase 2 with only those images.
+- ProgressTracker stepper gains a new AWAITING_REVIEW stage between TRIAGING and PROCESSING.
+- Results page shows a full image review grid at AWAITING_REVIEW: thumbnails, route badges, select/deselect all, "Generate questions for N images" button.
+
+**How it works:**
+- Phase 1 saves `storage/processed/{job_id}/triage_results.json` after triage, then sets status to `AWAITING_REVIEW` and stops.
+- The review endpoint reads this JSON and maps each item to a thumbnail URL using the existing `/preview/image/{job_id}/images/{filename}` route.
+- On confirm, Phase 2 loads `triage_results.json`, filters to `selected_ids`, resets progress counters, and runs the full processing pipeline on only the selected images.
+- Frontend polls every 2.5s as normal — when `AWAITING_REVIEW` is detected, triage data is fetched once and the review UI replaces the progress spinner. After confirm, status returns to PROCESSING and the tracker resumes.
+
+**Files affected:**
+- `vqg/backend/workers/celery_app.py` — split into two tasks; `_save_triage_results()` helper added
+- `vqg/backend/routes/review.py` — NEW: triage-review + confirm endpoints
+- `vqg/backend/routes/upload.py` — calls `parse_and_triage_task` instead of `process_pdf_task`
+- `vqg/backend/main.py` — registers review router
+- `vqg/backend/models/schemas.py` — `AWAITING_REVIEW` added to `JobStatus` enum
+- `vqg/frontend/components/ProgressTracker.js` — AWAITING_REVIEW stage added
+- `vqg/frontend/pages/results/[jobId].js` — `ImageReview` component + confirm handler
+
+**Known issues / next steps:**
+- User cannot change the route classification (e.g. override LABEL_BLANK → CONTEXT_MCQ) from the review UI — selection only. Route override could be a future addition.
+
+---
+
+## 2026-04-19 — HTML Study Guide export + bug fixes
+
+**What was added/changed:**
+- HTML export: every job now generates a standalone `study_guide.html` alongside the Anki `.apkg`. Dark-theme interactive page with "Show Answer" toggle on each card.
+- CONTEXT_MCQ cards in HTML are text-only (no slide image shown) — consistent with Anki behaviour.
+- `/export/{job_id}/html` API endpoint added to `export.py`.
+- `/storage` static file mount added to `main.py` so HTML diagrams resolve via relative paths.
+- `html_export_path` column added to `jobs` table (+ ALTER TABLE migration for existing DBs).
+- Frontend results page now shows "Open HTML Study Guide" button (indigo outline, secondary to Anki CTA) when `html_export_path` is present.
+- Fixed critical `db.py` bug: `get_job()` was using `SELECT *` with a hardcoded `cols` list that misaligned column order for freshly created databases — switched to explicit named SELECT.
+- `schemas.py` `Job` model now includes `html_export_path` field.
+
+**How it works:**
+- `html_exporter.py`: iterates enriched results, skips items with no questions. LABEL_BLANK and SEQUENCE_ORDER cards get an image card (numbered overlay shown, answer revealed on click via CSS overlay). CONTEXT_MCQ cards use a text-only template (no `<img>` tag). Output saved to `storage/exports/{job_id}/study_guide.html`.
+- `celery_app.py` Step 5 (EXPORTING): calls `build_anki_deck()` then `build_html_export()` in sequence. Both paths saved to DB via `update_job(export_path=..., html_export_path=...)`.
+- DB column fix: explicit `SELECT job_id, status, ..., generated_images, quiz_count, html_export_path, ...` ensures column→dict mapping is correct regardless of whether DB was migrated or freshly created.
+
+**Files affected:**
+- `vqg/backend/pipeline/html_exporter.py` — NEW: standalone HTML study guide generator
+- `vqg/backend/routes/export.py` — added `/export/{job_id}/html` endpoint
+- `vqg/backend/main.py` — added `/storage` static file mount
+- `vqg/backend/models/db.py` — `html_export_path` column; `get_job()` explicit SELECT bug fix
+- `vqg/backend/models/schemas.py` — `html_export_path` field on `Job` model
+- `vqg/backend/workers/celery_app.py` — calls `build_html_export()` in EXPORTING step
+- `vqg/frontend/pages/results/[jobId].js` — HTML download button
+- `.gitignore` — dev scripts excluded
+
+**Known issues / next steps:**
+- HTML study guide uses relative paths to `storage/` — works when served via FastAPI static mount, but images won't load if the file is opened directly from disk after downloading. Embedding base64 images would make it truly portable but increases file size significantly.
+- Deployment (Oracle Cloud / Hetzner / GCP) still deferred.
+
+---
+
+## 2026-04-15 — Large PDF Optimization (150+ pages)
+
+**What was added/changed:**
+- Bounded image limit increased: `MAX_IMAGES_PER_PDF` bumped from 50 to 300 to support full textbooks and deep slide decks.
+- Parsing stage parallelized: `pdf_parser.py` now leverages a `ThreadPoolExecutor` to evaluate pages concurrently in batches of 10, protecting memory while overlapping the heavy Gemini vision calls.
+- Granular parsing progress: Database state maps explicitly to `PARSING (Page X/Y)`, letting the frontend dynamically inform the user of ongoing operations during deep parsing logic.
+
+**How it works:**
+- `pdf_parser.py`: PyMuPDF `doc` relies on thread-local scopes. Each batch spawns fresh `fitz.open()` contexts isolating extraction workloads. Results are merged retaining original reading order.
+- `celery_app.py`: Overrode base `parse_pdf` with custom `progress_callback` mapped seamlessly into SQLite (`status=f"PARSING (Page {p}/{t})"`). Next.js consumes this organically via routine `/jobs/{id}` polling.
+
+**Files affected:**
+- `vqg/backend/config.py` — MAX_IMAGES_PER_PDF variable updated.
+- `vqg/backend/pipeline/pdf_parser.py` — Concurrent mapping execution context built.
+- `vqg/backend/workers/celery_app.py` — Hooking into closure scope for SQLite telemetry feedback.
+
+**Known issues / next steps:**
+- Very large uploads (>30MB PDFs) may push system RAM constraints further down the pipeline in generating routines if hundreds of images match selection criteria concurrently.
+
+---
+
 ## 2026-04-13 — Pipeline parallelization
 
 **What was added/changed:**
