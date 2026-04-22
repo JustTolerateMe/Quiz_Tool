@@ -25,6 +25,32 @@ TEMPLATE — copy this block for each entry:
 ---
 -->
 
+## 2026-04-22 — Print-friendly PDF export
+
+**What was added/changed:**
+- New export format: A4 PDF with 2 quiz card blocks per page, each split into a question half (image + question text) and an answer half (correct answer, distractors A/B/C, explanation) separated by a dashed fold line.
+- "Download Print PDF" button added to results page alongside existing Anki and HTML buttons.
+- `pdf_export_path` column added to the jobs DB table.
+
+**How it works:**
+- `vqg/backend/pipeline/pdf_exporter.py` uses `fpdf2` (pure Python, no system deps). Each question in `results` becomes one card block. Image cards (LABEL_BLANK) embed the numbered overlay image; text-only cards (CONTEXT_MCQ) skip the image section.
+- `build_pdf_export` is called in Celery Phase 2 alongside `build_anki_deck` and `build_html_export`. Path saved to DB as `pdf_export_path`.
+- `GET /export/{job_id}/pdf` serves the file. Frontend checks `job.pdf_export_path` to show the button.
+
+**Files affected:**
+- `vqg/backend/pipeline/pdf_exporter.py` — NEW
+- `vqg/backend/models/db.py` — added `pdf_export_path` column + migration
+- `vqg/backend/models/schemas.py` — added `pdf_export_path` field to Job model
+- `vqg/backend/workers/celery_app.py` — calls `build_pdf_export` in export step
+- `vqg/backend/routes/export.py` — added `GET /export/{job_id}/pdf`
+- `vqg/frontend/pages/results/[jobId].js` — added PDF download button
+- `vqg/requirements.txt` — added `fpdf2==2.7.9`
+
+**Known issues / next steps:**
+- To deploy: `git pull && pip install fpdf2==2.7.9 && systemctl restart vqg_backend vqg_worker` on Hetzner server.
+
+---
+
 ## 2026-04-22 — Hetzner Cloud deployment (live at http://178.104.251.221)
 
 **What was added/changed:**
