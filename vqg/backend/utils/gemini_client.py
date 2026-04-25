@@ -163,6 +163,48 @@ def call_vision_text(image_path: str, prompt: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Text-only call (returns JSON dict/list — no image)
+# ---------------------------------------------------------------------------
+def call_text_json(prompt: str) -> dict | list:
+    """
+    Send a text-only prompt to Gemini Flash and parse the JSON response.
+
+    Retries once on failure. Raises RuntimeError if both attempts fail.
+    Uses the same rate limiter as vision calls.
+    """
+    last_error: Exception | None = None
+
+    for attempt in range(2):
+        try:
+            _enforce_rate_limit()
+            response = _client.models.generate_content(
+                model=GEMINI_FLASH_MODEL,
+                contents=[prompt],
+            )
+            raw = response.text
+            cleaned = strip_json_fences(raw)
+            return json.loads(cleaned)
+
+        except json.JSONDecodeError as e:
+            last_error = e
+            logger.warning(
+                "call_text_json: JSON parse failed (attempt %d/2): %s",
+                attempt + 1, e,
+            )
+        except Exception as e:
+            last_error = e
+            logger.warning(
+                "call_text_json: API error (attempt %d/2): %s",
+                attempt + 1, e,
+            )
+
+        if attempt == 0:
+            time.sleep(2)
+
+    raise RuntimeError(f"call_text_json failed after 2 attempts: {last_error}")
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 def _infer_mime_type(image_path: str) -> str:

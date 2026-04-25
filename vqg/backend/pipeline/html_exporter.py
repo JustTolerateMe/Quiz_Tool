@@ -253,8 +253,8 @@ def build_html_export(results: list[dict], job_id: str, pdf_filename: str) -> st
         if not questions:
             continue
 
-        # CONTEXT_MCQ cards are text-only — no image shown (consistent with Anki behaviour)
-        is_context_mcq = item.get("method") == "context_mcq"
+        # Text-only cards (CONTEXT_MCQ, TEXT_MCQ) carry no image
+        is_context_mcq = item.get("method") in ("context_mcq", "text_mcq")
 
         if is_context_mcq:
             image_path = None

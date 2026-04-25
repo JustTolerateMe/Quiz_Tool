@@ -5,7 +5,44 @@
 
 ---
 
-<!--
+## 2026-04-26 — Fix: Text question visibility and UI toggle
+
+**What was added/changed:**
+- Fixed a bug where `TEXT_MCQ` cards were excluded from the browser preview due to a missing route in the `/preview` backend filter.
+- Added a "Include text questions" toggle to the frontend image review screen.
+- Surfaced the "eligible text pages" count (pages > 40 words) in the UI so users know if text questions are available before confirming.
+- Fixed frontend `confirm` payload to explicitly pass the `include_text_questions` preference.
+
+**How it works:**
+- Phase 1 saves `text_chunks.json`. The `/triage-review` endpoint counts these and returns `eligible_text_pages`.
+- Frontend displays a toggle if count > 0.
+- Phase 2 generation loop now adds these questions to `processing_results.json`, and the preview/ANKI/HTML exporters correctly render them as text-only cards (no image).
+
+**Files affected:**
+- `vqg/backend/routes/preview.py` — updated route filter.
+- `vqg/frontend/pages/results/[jobId].js` — added toggle state and UI components.
+
+---
+
+## 2026-04-26 — PDF Exporter: Unicode font compatibility fix
+
+**What was added/changed:**
+- Fixed "Character outside range" crash in PDF exporter by implementing a comprehensive ASCII sanitization helper `_clean_text()`.
+- Standardized all quiz card text fields (questions, structure names, distractors, explanations) to strip/replace non-ASCII characters that the base Helvetica font cannot handle.
+- Replaced horizontal ellipsis (`…`) with standard dots (`...`) in `textwrap.shorten` placeholder.
+
+**How it works:**
+- `_clean_text()` uses a dictionary to map common Unicode characters (curly quotes, en/em dashes, non-breaking spaces) to their ASCII equivalents.
+- Final safety pass: `text.encode("ascii", "ignore").decode("ascii")` ensures any remaining unsupported characters are stripped rather than causing a PDF generation crash.
+- This is a robust alternative to embedding 20MB+ Unicode `.ttf` files, keeping the export lightweight while maintaining reliability on AI-generated text that often includes fancy punctuation.
+
+**Files affected:**
+- `vqg/backend/pipeline/pdf_exporter.py` — added `_clean_text()` and wrapped all text rendering calls.
+
+**Known issues / next steps:**
+- Scientific symbols (e.g., Greek letters) in text will currently be stripped. If medical nomenclature requires these, we will need to switch to a Unicode-compatible font (e.g., DejaVuSans).
+
+---
 TEMPLATE — copy this block for each entry:
 
 ## [YYYY-MM-DD] — [Short title, e.g. "Auth module + PIN lock"]

@@ -63,6 +63,27 @@ def _collect_cards(results: list[dict]) -> list[dict]:
     return cards
 
 
+def _clean_text(text: str) -> str:
+    """Replace common Unicode characters with ASCII equivalents and strip others."""
+    if not text:
+        return ""
+    replacements = {
+        "\u2013": "-",  # en dash
+        "\u2014": "-",  # em dash
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u201c": '"',  # left double quote
+        "\u201d": '"',  # right double quote
+        "\u2026": "...", # ellipsis
+        "\u00a0": " ",   # non-breaking space
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    # Final fallback: encode to latin-1 and ignore errors, then back to string
+    # Helvetica usually handles latin-1 fairly well, but pure ASCII is safest
+    return text.encode("ascii", "ignore").decode("ascii")
+
+
 def _draw_card(pdf: FPDF, card: dict, x: float, y: float, w: float, h: float):
     q = card["q"]
     image_path = card["image_path"]
@@ -100,7 +121,7 @@ def _draw_card(pdf: FPDF, card: dict, x: float, y: float, w: float, h: float):
     # Question text
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_text_color(15, 23, 42)     # slate-900
-    question_text = q.get("question", "")
+    question_text = _clean_text(q.get("question", ""))
     pdf.set_xy(x + 3, cursor)
     pdf.multi_cell(w - 6, 5, question_text)
     cursor = pdf.get_y() + 2
@@ -127,7 +148,7 @@ def _draw_card(pdf: FPDF, card: dict, x: float, y: float, w: float, h: float):
     pdf.set_font("Helvetica", "B", 10)
     pdf.set_text_color(5, 150, 105)    # emerald-600
     pdf.set_xy(x + 3, cursor)
-    pdf.multi_cell(w - 6, 5, q.get("structure_name", ""))
+    pdf.multi_cell(w - 6, 5, _clean_text(q.get("structure_name", "")))
     cursor = pdf.get_y() + 2
 
     # Distractors A/B/C
@@ -137,18 +158,18 @@ def _draw_card(pdf: FPDF, card: dict, x: float, y: float, w: float, h: float):
     pdf.set_text_color(100, 116, 139)  # slate-500
     for label, d in zip(labels, distractors):
         pdf.set_xy(x + 3, cursor)
-        pdf.multi_cell(w - 6, 4, f"{label}. {d}")
+        pdf.multi_cell(w - 6, 4, f"{label}. {_clean_text(d)}")
         cursor = pdf.get_y()
         if cursor > y + h - 8:
             break
 
     # Explanation
-    explanation = q.get("explanation", "")
+    explanation = _clean_text(q.get("explanation", ""))
     if explanation and cursor < y + h - 10:
         cursor += 2
         pdf.set_font("Helvetica", "I", 7)
         pdf.set_text_color(148, 163, 184)  # slate-400
         pdf.set_xy(x + 3, cursor)
         # truncate explanation so it doesn't overflow the card
-        wrapped = textwrap.shorten(explanation, width=160, placeholder="…")
+        wrapped = textwrap.shorten(explanation, width=160, placeholder="...")
         pdf.multi_cell(w - 6, 3.5, wrapped)

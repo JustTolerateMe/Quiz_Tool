@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 class ConfirmRequest(BaseModel):
     selected_ids: list[str]
+    include_text_questions: bool = True
 
 
 @router.get("/jobs/{job_id}/triage-review")
@@ -52,7 +53,22 @@ async def get_triage_review(job_id: str):
             "description": item.get("region_description", ""),
         })
 
-    return {"job_id": job_id, "total": len(images), "images": images}
+    # Count eligible text pages so the frontend can show the toggle label
+    text_chunks_path = os.path.join(PROCESSED_PATH, job_id, "text_chunks.json")
+    eligible_text_pages = 0
+    if os.path.exists(text_chunks_path):
+        try:
+            with open(text_chunks_path, "r", encoding="utf-8") as f:
+                eligible_text_pages = len(json.load(f))
+        except Exception:
+            pass
+
+    return {
+        "job_id": job_id,
+        "total": len(images),
+        "images": images,
+        "eligible_text_pages": eligible_text_pages,
+    }
 
 
 @router.post("/jobs/{job_id}/confirm")
@@ -74,10 +90,16 @@ async def confirm_selection(job_id: str, body: ConfirmRequest):
     filename = job["pdf_filename"]
 
     update_job(job_id, status="PROCESSING")
-    process_and_export_task.delay(job_id, filename, body.selected_ids)
+    process_and_export_task.delay(
+        job_id, filename, body.selected_ids, body.include_text_questions
+    )
 
     logger.info(
-        "job %s: confirmed — %d images selected, Phase 2 enqueued",
-        job_id, len(body.selected_ids),
+        "job %s: confirmed — %d images selected, text_questions=%s, Phase 2 enqueued",
+        job_id, len(body.selected_ids), body.include_text_questions,
     )
-    return {"status": "processing", "selected": len(body.selected_ids)}
+    return {
+        "status": "processing",
+        "selected": len(body.selected_ids),
+        "include_text_questions": body.include_text_questions,
+    }

@@ -46,7 +46,7 @@ async def get_job_preview(job_id: str):
     cards = []
     for item in results:
         route = item.get("route")
-        if route not in ("LABEL_BLANK", "CONTEXT_MCQ", "SEQUENCE_ORDER"):
+        if route not in ("LABEL_BLANK", "CONTEXT_MCQ", "SEQUENCE_ORDER", "TEXT_MCQ"):
             continue
         questions = item.get("questions") or []
         if not questions:

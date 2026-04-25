@@ -24,6 +24,7 @@ export default function ResultsPage() {
   const [preview, setPreview]         = useState(null)
   const [triageData, setTriageData]   = useState(null)
   const [selectedIds, setSelectedIds] = useState(new Set())
+  const [includeTextQuestions, setIncludeTextQuestions] = useState(true)
   const [confirming, setConfirming]   = useState(false)
   const intervalRef    = useRef(null)
   const triageLoadedRef = useRef(false)
@@ -99,7 +100,10 @@ export default function ResultsPage() {
       await fetch(`${API_URL}/jobs/${jobId}/confirm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_ids: [...selectedIds] }),
+        body: JSON.stringify({
+          selected_ids: [...selectedIds],
+          include_text_questions: includeTextQuestions
+        }),
       })
     } catch (_) { setConfirming(false) }
   }
@@ -240,6 +244,9 @@ export default function ResultsPage() {
                   onConfirm={handleConfirm}
                   confirming={confirming}
                   apiUrl={API_URL}
+                  includeTextQuestions={includeTextQuestions}
+                  onToggleText={(val) => setIncludeTextQuestions(val)}
+                  eligibleTextPages={triageData.eligible_text_pages}
                 />
               )}
 
@@ -481,7 +488,7 @@ const ROUTE_LABEL = {
   SEQUENCE_ORDER: 'Sequence',
 }
 
-function ImageReview({ images, selectedIds, onToggle, onSelectAll, onDeselectAll, onConfirm, confirming, apiUrl }) {
+function ImageReview({ images, selectedIds, onToggle, onSelectAll, onDeselectAll, onConfirm, confirming, apiUrl, includeTextQuestions, onToggleText, eligibleTextPages }) {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
       {/* Header */}
@@ -508,6 +515,35 @@ function ImageReview({ images, selectedIds, onToggle, onSelectAll, onDeselectAll
           </button>
         </div>
       </div>
+
+      {/* Text questions toggle */}
+      {eligibleTextPages > 0 && (
+        <div className="px-6 py-4 bg-indigo-50/50 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-indigo-100 flex items-center justify-center">
+              <svg className="w-4 h-4 text-indigo-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.25c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
+              </svg>
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-indigo-900">Include text questions</p>
+              <p className="text-xs text-indigo-600">
+                Found {eligibleTextPages} page{eligibleTextPages !== 1 ? 's' : ''} with textbook content
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => onToggleText(!includeTextQuestions)}
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none 
+              ${includeTextQuestions ? 'bg-indigo-600' : 'bg-slate-200'}`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform 
+                ${includeTextQuestions ? 'translate-x-6' : 'translate-x-1'}`}
+            />
+          </button>
+        </div>
+      )}
 
       {/* Image grid */}
       <div className="p-4 grid grid-cols-2 gap-3 sm:grid-cols-3">

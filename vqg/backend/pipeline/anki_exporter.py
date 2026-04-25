@@ -101,8 +101,8 @@ def build_anki_deck(results: list[dict], job_id: str, pdf_filename: str) -> str:
         if not questions:
             continue
 
-        # CONTEXT_MCQ cards are text-only — no image on the card
-        if item.get("method") == "context_mcq":
+        # Text-only cards (CONTEXT_MCQ, TEXT_MCQ) carry no image
+        if item.get("method") in ("context_mcq", "text_mcq"):
             image_tag = ""
         else:
             # Use processed image for the card front; fall back to original
