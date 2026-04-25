@@ -4,6 +4,8 @@ from typing import Optional
 
 from backend.config import DB_PATH
 
+_ACTIVE_STATUSES = ('QUEUED', 'PARSING', 'TRIAGING', 'PROCESSING', 'GENERATING', 'EXPORTING')
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -94,3 +96,78 @@ def get_job(job_id: str) -> Optional[dict]:
         "html_export_path", "pdf_export_path", "error", "created_at", "updated_at",
     ]
     return dict(zip(cols, row))
+
+
+def get_queue_position(job_id: str) -> Optional[int]:
+    """Return how many active/queued jobs are ahead of this one, or None if not queued."""
+    conn = _connect()
+    job_row = conn.execute(
+        "SELECT status, created_at FROM jobs WHERE job_id = ?", (job_id,)
+    ).fetchone()
+    if job_row is None or job_row[0] != "QUEUED":
+        conn.close()
+        return None
+    created_at = job_row[1]
+    placeholders = ",".join("?" * len(_ACTIVE_STATUSES))
+    ahead = conn.execute(
+        f"SELECT COUNT(*) FROM jobs WHERE status IN ({placeholders}) AND created_at < ?",
+        (*_ACTIVE_STATUSES, created_at),
+    ).fetchone()[0]
+    conn.close()
+    return ahead + 1
+
+
+def get_stale_jobs(statuses: tuple, older_than_minutes: int) -> list[dict]:
+    """Return jobs in given statuses whose updated_at is older than N minutes."""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)).isoformat()
+    placeholders = ",".join("?" * len(statuses))
+    conn = _connect()
+    rows = conn.execute(
+        f"SELECT job_id, status FROM jobs WHERE status IN ({placeholders}) AND updated_at < ?",
+        (*statuses, cutoff),
+    ).fetchall()
+    conn.close()
+    return [{"job_id": r[0], "status": r[1]} for r in rows]
+
+
+def get_jobs_for_cleanup() -> dict:
+    """Return jobs eligible for cleanup grouped by rule."""
+    from datetime import timedelta
+    now = datetime.now(timezone.utc)
+    conn = _connect()
+
+    # AWAITING_REVIEW older than 24h
+    cutoff_24h = (now - timedelta(hours=24)).isoformat()
+    abandoned = conn.execute(
+        "SELECT job_id FROM jobs WHERE status = 'AWAITING_REVIEW' AND updated_at < ?",
+        (cutoff_24h,),
+    ).fetchall()
+
+    # COMPLETE or FAILED older than 7 days
+    cutoff_7d = (now - timedelta(days=7)).isoformat()
+    expired = conn.execute(
+        "SELECT job_id FROM jobs WHERE status IN ('COMPLETE','FAILED') AND updated_at < ?",
+        (cutoff_7d,),
+    ).fetchall()
+
+    # QUEUED older than 2h (task message likely lost from Redis)
+    cutoff_2h = (now - timedelta(hours=2)).isoformat()
+    lost = conn.execute(
+        "SELECT job_id FROM jobs WHERE status = 'QUEUED' AND created_at < ?",
+        (cutoff_2h,),
+    ).fetchall()
+
+    conn.close()
+    return {
+        "abandoned": [r[0] for r in abandoned],
+        "expired": [r[0] for r in expired],
+        "lost": [r[0] for r in lost],
+    }
+
+
+def delete_job(job_id: str) -> None:
+    conn = _connect()
+    conn.execute("DELETE FROM jobs WHERE job_id = ?", (job_id,))
+    conn.commit()
+    conn.close()

@@ -21,11 +21,13 @@ from concurrent.futures import ThreadPoolExecutor
 from celery import Celery
 from PIL import Image as PILImage
 
-from backend.config import PROCESSED_PATH, REDIS_URL
-from backend.models.db import update_job
+from backend.config import MAX_TEXT_QUESTIONS_TOTAL, PROCESSED_PATH, REDIS_URL, UPLOADS_PATH, IMAGES_PATH, EXPORTS_PATH
+from backend.models.db import update_job, get_stale_jobs, get_jobs_for_cleanup, delete_job
 from backend.pipeline.image_triage import route_image, triage_image
 from backend.pipeline.label_extractor import extract_labels
 from backend.pipeline.pdf_parser import parse_pdf
+from backend.pipeline.text_extractor import extract_text_chunks
+from backend.pipeline.text_mcq_generator import generate_text_mcq
 from backend.pipeline.quiz_generator import generate_quiz
 from backend.pipeline.context_mcq_generator import generate_context_mcq
 from backend.pipeline.process_diagram_generator import generate_process_diagram_quiz
@@ -38,6 +40,17 @@ logger = logging.getLogger(__name__)
 
 app = Celery("vqg", broker=REDIS_URL)
 app.conf.result_expires = 86400  # keep results in Redis 24h
+app.conf.beat_schedule = {
+    "watchdog-every-5-minutes": {
+        "task": "backend.workers.celery_app.watchdog_task",
+        "schedule": 300,  # seconds
+    },
+    "cleanup-daily-3am": {
+        "task": "backend.workers.celery_app.cleanup_task",
+        "schedule": 86400,  # seconds (first run ~24h after worker start)
+    },
+}
+app.conf.timezone = "UTC"
 
 _STAGE_WORKERS = 4
 _BATCH_SIZE = 20
@@ -104,6 +117,13 @@ def parse_and_triage_task(self, job_id: str, pdf_path: str) -> None:
         # Save triage results for Phase 2 and for the review endpoint
         _save_triage_results(job_id, triaged)
 
+        # ----------------------------------------------------------------
+        # Step 3: Extract text chunks (parallel to image pipeline)
+        # ----------------------------------------------------------------
+        text_chunks = extract_text_chunks(pdf_path)
+        _save_text_chunks(job_id, text_chunks)
+        logger.info("job %s: %d eligible text pages saved", job_id, len(text_chunks))
+
         update_job(
             job_id,
             status="AWAITING_REVIEW",
@@ -127,11 +147,13 @@ def parse_and_triage_task(self, job_id: str, pdf_path: str) -> None:
 
 @app.task(bind=True, max_retries=0)
 def process_and_export_task(
-    self, job_id: str, filename: str, selected_ids: list
+    self, job_id: str, filename: str, selected_ids: list, include_text_questions: bool = True
 ) -> None:
     """
     Phase 2: Process and generate questions for user-selected images only.
     Called by POST /jobs/{id}/confirm after user reviews triage results.
+
+    include_text_questions: if True, also generate MCQ from text chunks saved in Phase 1.
     """
     update_job(job_id, status="PROCESSING")
 
@@ -144,8 +166,12 @@ def process_and_export_task(
         selected_set = set(selected_ids)
         triaged = [item for item in all_triaged if item["image_id"] in selected_set]
 
+        # Load text chunks written by Phase 1
+        text_chunks = _load_text_chunks(job_id) if include_text_questions else []
+
         update_job(job_id, total_images=len(triaged), processed_images=0, generated_images=0, quiz_count=0)
-        logger.info("job %s: Phase 2 starting — %d/%d images selected", job_id, len(triaged), len(all_triaged))
+        logger.info("job %s: Phase 2 starting — %d/%d images selected, %d text chunks",
+                    job_id, len(triaged), len(all_triaged), len(text_chunks))
 
         # ----------------------------------------------------------------
         # Step 3: Process images — BATCHED
@@ -261,6 +287,56 @@ def process_and_export_task(
                     generated_count += 1
             update_job(job_id, generated_images=generated_count, quiz_count=quiz_count)
 
+        # ----------------------------------------------------------------
+        # Step 4b: Generate text-based MCQ from page text chunks
+        # ----------------------------------------------------------------
+        if text_chunks:
+            update_job(job_id, status="GENERATING (text)")
+
+            def _generate_text_one(chunk):
+                try:
+                    questions = generate_text_mcq(chunk)
+                    if not questions:
+                        return None
+                    return {
+                        "image_id": chunk["chunk_id"],
+                        "image_path": None,
+                        "processed_path": None,
+                        "page_number": chunk["page_number"],
+                        "route": "TEXT_MCQ",
+                        "method": "text_mcq",
+                        "questions": questions,
+                    }
+                except Exception as e:
+                    logger.error("job %s: text generation failed for %s: %s",
+                                 job_id, chunk.get("chunk_id"), e)
+                    return None
+
+            text_budget = MAX_TEXT_QUESTIONS_TOTAL
+            for i in range(0, len(text_chunks), _BATCH_SIZE):
+                if text_budget <= 0:
+                    logger.info("job %s: text question cap reached (%d)", job_id, MAX_TEXT_QUESTIONS_TOTAL)
+                    break
+                batch = text_chunks[i : i + _BATCH_SIZE]
+                with ThreadPoolExecutor(max_workers=_STAGE_WORKERS) as pool:
+                    for text_item in pool.map(_generate_text_one, batch):
+                        if text_item and text_item.get("questions"):
+                            q_count = len(text_item["questions"])
+                            if text_budget >= q_count:
+                                enriched.append(text_item)
+                                quiz_count += q_count
+                                generated_count += 1
+                                text_budget -= q_count
+                            else:
+                                # Partial: trim to remaining budget
+                                text_item["questions"] = text_item["questions"][:text_budget]
+                                if text_item["questions"]:
+                                    enriched.append(text_item)
+                                    quiz_count += len(text_item["questions"])
+                                    generated_count += 1
+                                text_budget = 0
+                update_job(job_id, generated_images=generated_count, quiz_count=quiz_count)
+
         _save_processing_results(job_id, enriched)
 
         # ----------------------------------------------------------------
@@ -309,3 +385,90 @@ def _save_processing_results(job_id: str, results: list) -> None:
             json.dump(results, f, indent=2, default=str)
     except Exception as e:
         logger.warning("job %s: could not save processing results: %s", job_id, e)
+
+
+def _save_text_chunks(job_id: str, chunks: list) -> None:
+    job_dir = os.path.join(PROCESSED_PATH, job_id)
+    os.makedirs(job_dir, exist_ok=True)
+    path = os.path.join(job_dir, "text_chunks.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(chunks, f, indent=2, ensure_ascii=False)
+        logger.info("job %s: text chunks saved (%d pages)", job_id, len(chunks))
+    except Exception as e:
+        logger.warning("job %s: could not save text chunks: %s", job_id, e)
+
+
+def _load_text_chunks(job_id: str) -> list:
+    path = os.path.join(PROCESSED_PATH, job_id, "text_chunks.json")
+    if not os.path.isfile(path):
+        logger.debug("job %s: no text_chunks.json found — skipping text questions", job_id)
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("job %s: could not load text chunks: %s", job_id, e)
+        return []
+
+
+def _delete_job_files(job_id: str) -> None:
+    import shutil
+    import glob
+    # Remove per-job directories
+    for base in (IMAGES_PATH, PROCESSED_PATH, EXPORTS_PATH):
+        job_dir = os.path.join(base, job_id)
+        if os.path.isdir(job_dir):
+            shutil.rmtree(job_dir, ignore_errors=True)
+    # Remove uploaded PDF (prefixed with job_id)
+    for pdf in glob.glob(os.path.join(UPLOADS_PATH, f"{job_id}_*")):
+        try:
+            os.remove(pdf)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Periodic tasks (run by Celery Beat via -B flag on the worker)
+# ---------------------------------------------------------------------------
+
+@app.task
+def watchdog_task() -> None:
+    """Mark jobs stuck in active statuses for >30 min as FAILED."""
+    stale = get_stale_jobs(
+        statuses=("PARSING", "TRIAGING", "PROCESSING", "GENERATING", "EXPORTING"),
+        older_than_minutes=30,
+    )
+    for job in stale:
+        logger.warning("watchdog: job %s stuck in %s — marking FAILED", job["job_id"], job["status"])
+        update_job(
+            job["job_id"],
+            status="FAILED",
+            error="Timed out — worker likely crashed. Please re-upload.",
+        )
+    if stale:
+        logger.info("watchdog: marked %d stale job(s) as FAILED", len(stale))
+
+
+@app.task
+def cleanup_task() -> None:
+    """Delete files and DB rows for abandoned / expired jobs."""
+    groups = get_jobs_for_cleanup()
+
+    for job_id in groups["abandoned"]:
+        logger.info("cleanup: AWAITING_REVIEW expired — deleting files for %s", job_id)
+        _delete_job_files(job_id)
+        update_job(job_id, status="FAILED", error="Expired — not confirmed within 24 hours.")
+
+    for job_id in groups["expired"]:
+        logger.info("cleanup: COMPLETE/FAILED >7d — removing %s", job_id)
+        _delete_job_files(job_id)
+        delete_job(job_id)
+
+    for job_id in groups["lost"]:
+        logger.info("cleanup: QUEUED >2h (task lost) — marking FAILED for %s", job_id)
+        update_job(job_id, status="FAILED", error="Task message lost — please re-upload.")
+
+    total = len(groups["abandoned"]) + len(groups["expired"]) + len(groups["lost"])
+    if total:
+        logger.info("cleanup: processed %d job(s) total", total)

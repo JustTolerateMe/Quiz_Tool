@@ -188,7 +188,7 @@ export default function ResultsPage() {
                   <span className={`flex-shrink-0 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold
                     ${isComplete ? 'bg-emerald-50 text-emerald-700' : isFailed ? 'bg-red-50 text-red-700' : 'bg-indigo-50 text-indigo-700'}`}
                   >
-                    {!isComplete && !isFailed && <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />}
+                    {!isComplete && !isFailed && !isAwaitingReview && <span className="w-1.5 h-1.5 rounded-full bg-indigo-500 animate-pulse" />}
                     {isComplete && (
                       <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
@@ -202,6 +202,12 @@ export default function ResultsPage() {
                     {job.status}
                   </span>
                 </div>
+
+                {job.status === 'QUEUED' && job.queue_position > 1 && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    Position <span className="font-semibold text-slate-700">{job.queue_position}</span> in queue — one job ahead is processing
+                  </p>
+                )}
 
                 {job.total_images > 0 && (
                   <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-3 gap-4">

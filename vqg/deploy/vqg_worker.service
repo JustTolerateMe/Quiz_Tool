@@ -8,7 +8,7 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/vqg/vqg
 EnvironmentFile=/home/ubuntu/vqg/vqg/.env
 Environment="PATH=/home/ubuntu/vqg/vqg/venv/bin"
-ExecStart=/home/ubuntu/vqg/vqg/venv/bin/celery -A backend.workers.celery_app worker --pool=solo --loglevel=info
+ExecStart=/home/ubuntu/vqg/vqg/venv/bin/celery -A backend.workers.celery_app worker --pool=threads --concurrency=2 -B --loglevel=info
 Restart=always
 RestartSec=5
 
