@@ -25,6 +25,68 @@ TEMPLATE — copy this block for each entry:
 ---
 -->
 
+## 2026-04-26 — Reliability: concurrency, watchdog, cleanup, queue visibility
+
+**What was added/changed:**
+- Worker now runs `--pool=threads --concurrency=2 -B` — processes 2 jobs simultaneously; Celery Beat runs inside the same process.
+- Watchdog task (every 5 min): any job stuck in PARSING/TRIAGING/PROCESSING/GENERATING/EXPORTING for >30 min is marked FAILED automatically.
+- Cleanup task (daily): removes files + DB rows for abandoned AWAITING_REVIEW jobs (>24h), expired COMPLETE/FAILED jobs (>7 days), and lost QUEUED jobs (>2h with no worker pickup).
+- Queue position: `GET /jobs/{id}` now returns `queue_position` (null if not queued, N = position ahead). Frontend shows "Position N in queue" when another job is processing ahead.
+
+**How it works:**
+- `--pool=threads` means both concurrent jobs run in the same process and share the rate limiter in `gemini_client.py` → total Gemini usage stays within 60 RPM free tier. Two separate processes would each get their own limiter and potentially double the RPM.
+- Beat schedule defined in `app.conf.beat_schedule`: watchdog every 300s, cleanup every 86400s. Running beat with `-B` inside the worker is fine for single-server; would need a separate beat process if ever scaling to multiple workers.
+- `_delete_job_files(job_id)` removes `storage/images/{id}/`, `storage/processed/{id}/`, `storage/exports/{id}/`, and `storage/uploads/{id}_*.pdf`.
+- `get_queue_position()` counts rows WHERE status IN active statuses AND created_at < this job's created_at, then adds 1.
+
+**Files affected:**
+- `vqg/backend/models/db.py` — added `get_queue_position()`, `get_stale_jobs()`, `get_jobs_for_cleanup()`, `delete_job()`
+- `vqg/backend/workers/celery_app.py` — added `beat_schedule`, `watchdog_task`, `cleanup_task`, `_delete_job_files()`
+- `vqg/backend/routes/jobs.py` — `queue_position` added to job status response
+- `vqg/deploy/vqg_worker.service` — `--pool=solo` → `--pool=threads --concurrency=2 -B`
+- `vqg/frontend/pages/results/[jobId].js` — queue position banner when status is QUEUED
+
+**Known issues / next steps:**
+- Deploy to Hetzner: `git pull && cp vqg/deploy/vqg_worker.service /etc/systemd/system/ && systemctl daemon-reload && systemctl restart vqg_worker`
+- Cleanup runs ~24h after worker first starts (not at a fixed clock time). If exact 3am scheduling is needed later, switch to a crontab string in beat_schedule.
+
+---
+
+## 2026-04-26 — Text-to-question pipeline (page text → MCQ cards)
+
+**What was added/changed:**
+- PDF page text is now extracted in Phase 1 alongside image region detection and saved as `text_chunks.json`.
+- Phase 2 generates MCQ flashcard questions from each eligible text chunk and merges them into the same `enriched` results list that feeds all three exports (Anki, HTML, PDF) — no exporter restructuring needed.
+- Question count is adaptive: sparse slide text (< 80 words) → max 3 questions; dense textbook text → `min(10, word_count // 40)`. Hard cap: 300 text questions per PDF (env-overridable as `MAX_TEXT_QUESTIONS_TOTAL`).
+- Review endpoint now returns `eligible_text_pages` count so the frontend can show a toggle label ("Include text questions from N pages").
+- `POST /jobs/{id}/confirm` accepts `include_text_questions: bool` (default `true`). Passing `false` skips text generation entirely.
+- Text cards carry `method: "text_mcq"` and no image. All three exporters already handled `method: "context_mcq"` as text-only; updated the check to `in ("context_mcq", "text_mcq")`.
+
+**How it works:**
+- `text_extractor.py`: opens PDF with PyMuPDF, strips boilerplate lines (page numbers, copyright, "Objectives" headers, lines ≤ 4 words) via regex, skips pages under 40 words. Returns `[{chunk_id, page_number, text, word_count}]`.
+- `text_mcq_generator.py`: calls new `call_text_json()` in `gemini_client.py` (text-only, no image, same rate limiter). Prompt includes two few-shot medical examples (one slide, one textbook paragraph) to anchor output quality. Returns same `{label_id, structure_name, question, distractors[3], difficulty, explanation}` schema as all other generators.
+- `call_text_json()` mirrors `call_vision_json()` — retries once, strips JSON fences, raises `RuntimeError` on both failures.
+- Text questions are generated for ALL pages (including pages that also had image cards), because a page may have a low-quality diagram alongside high-value textual content.
+- Budget tracking in Celery Phase 2 trims the last batch if the total would exceed `MAX_TEXT_QUESTIONS_TOTAL`.
+
+**Files affected:**
+- `vqg/backend/pipeline/text_extractor.py` — NEW
+- `vqg/backend/pipeline/text_mcq_generator.py` — NEW
+- `vqg/backend/utils/gemini_client.py` — added `call_text_json(prompt)`
+- `vqg/backend/config.py` — added `MAX_TEXT_QUESTIONS_TOTAL = 300`
+- `vqg/backend/workers/celery_app.py` — Phase 1: calls `extract_text_chunks`, saves `text_chunks.json`. Phase 2: loads chunks, batch-generates, merges. Added `_save_text_chunks` / `_load_text_chunks` helpers. Added `include_text_questions` param to `process_and_export_task`.
+- `vqg/backend/routes/review.py` — triage-review response includes `eligible_text_pages`; `ConfirmRequest` adds `include_text_questions` field
+- `vqg/backend/pipeline/anki_exporter.py` — method check: `"context_mcq"` → `("context_mcq", "text_mcq")`
+- `vqg/backend/pipeline/html_exporter.py` — same method check update
+- `vqg/backend/pipeline/pdf_exporter.py` — no change needed (already handles `None` image_path correctly)
+
+**Known issues / next steps:**
+- Frontend toggle ("Include text questions from N pages") not yet wired — `eligible_text_pages` is returned by the API but the review UI doesn't render it yet.
+- Domain detection for text prompts currently hardcoded to `"MEDICINE"` — could be inferred from the triage results (most common `domain` across triaged images).
+- Per-chunk domain inference (slide vs. textbook) is purely word-count-based; a short textbook excerpt and a long slide both pass the same filter — acceptable for MVP.
+
+---
+
 ## 2026-04-22 — Print-friendly PDF export
 
 **What was added/changed:**
