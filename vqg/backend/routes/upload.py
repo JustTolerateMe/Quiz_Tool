@@ -5,7 +5,7 @@ import uuid
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
 from backend.config import UPLOADS_PATH
-from backend.main import limiter
+from backend.limiter import limiter
 from backend.models.db import create_job
 from backend.workers.celery_app import parse_and_triage_task
 

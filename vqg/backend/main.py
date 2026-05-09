@@ -2,20 +2,18 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-from slowapi.util import get_remote_address
 
 from backend.config import EXPORTS_PATH, IMAGES_PATH, PROCESSED_PATH, UPLOADS_PATH
+from backend.limiter import limiter
 from backend.models.db import init_db
 from backend.routes import export, jobs, preview, review, upload
 
 _ALLOWED_ORIGINS = os.getenv(
     "ALLOWED_ORIGINS", "http://localhost:3000"
 ).split(",")
-
-limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="VQG — Visual Quiz Generator",
