@@ -1,8 +1,15 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
-from backend.models.db import get_job, get_queue_position
+from backend.models.db import get_job, get_jobs_for_user, get_queue_position
 
 router = APIRouter()
+
+
+@router.get("/jobs")
+async def list_jobs(x_user_id: str = Header(None)):
+    if not x_user_id:
+        raise HTTPException(status_code=401, detail="Sign in to view your jobs.")
+    return {"jobs": get_jobs_for_user(x_user_id)}
 
 
 @router.get("/jobs/{job_id}")

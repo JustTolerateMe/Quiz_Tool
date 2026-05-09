@@ -2,7 +2,7 @@ import os
 import shutil
 import uuid
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Header, HTTPException, Request, UploadFile
 
 from backend.config import UPLOADS_PATH
 from backend.limiter import limiter
@@ -17,7 +17,7 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 @router.post("/upload")
 @limiter.limit("10/hour")
-async def upload_pdf(request: Request, file: UploadFile = File(...)):
+async def upload_pdf(request: Request, file: UploadFile = File(...), x_user_id: str = Header(None)):
     if file.content_type not in ALLOWED_CONTENT_TYPES and not (
         file.filename and file.filename.lower().endswith(".pdf")
     ):
@@ -36,7 +36,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
         os.remove(pdf_path)
         raise HTTPException(status_code=413, detail="File too large. Maximum size is 50 MB.")
 
-    create_job(job_id, safe_filename)
+    create_job(job_id, safe_filename, user_id=x_user_id)
     parse_and_triage_task.delay(job_id, pdf_path)
 
     return {"job_id": job_id, "status": "QUEUED"}

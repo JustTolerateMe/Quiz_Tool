@@ -109,3 +109,4 @@ class Job(BaseModel):
     error: Optional[str] = None
     created_at: str
     updated_at: str
+    user_id: Optional[str] = None

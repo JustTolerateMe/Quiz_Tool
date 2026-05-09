@@ -35,35 +35,34 @@ def init_db() -> None:
             pdf_export_path  TEXT,
             error            TEXT,
             created_at       TEXT NOT NULL,
-            updated_at       TEXT NOT NULL
+            updated_at       TEXT NOT NULL,
+            user_id          TEXT
         )
     """)
-    # Migrate existing DBs that predate the generated_images column
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN generated_images INTEGER NOT NULL DEFAULT 0")
-    except Exception:
-        pass  # Column already exists
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN html_export_path TEXT")
-    except Exception:
-        pass  # Column already exists
-    try:
-        conn.execute("ALTER TABLE jobs ADD COLUMN pdf_export_path TEXT")
-    except Exception:
-        pass  # Column already exists
+    # Migrations for columns added after initial release
+    for migration in (
+        "ALTER TABLE jobs ADD COLUMN generated_images INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE jobs ADD COLUMN html_export_path TEXT",
+        "ALTER TABLE jobs ADD COLUMN pdf_export_path TEXT",
+        "ALTER TABLE jobs ADD COLUMN user_id TEXT",
+    ):
+        try:
+            conn.execute(migration)
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
 
-def create_job(job_id: str, filename: str) -> None:
+def create_job(job_id: str, filename: str, user_id: Optional[str] = None) -> None:
     now = _now()
     conn = _connect()
     conn.execute(
         """INSERT INTO jobs
            (job_id, status, pdf_filename, total_images, processed_images,
-            skipped_images, quiz_count, export_path, error, created_at, updated_at)
-           VALUES (?, 'QUEUED', ?, 0, 0, 0, 0, NULL, NULL, ?, ?)""",
-        (job_id, filename, now, now),
+            skipped_images, quiz_count, export_path, error, created_at, updated_at, user_id)
+           VALUES (?, 'QUEUED', ?, 0, 0, 0, 0, NULL, NULL, ?, ?, ?)""",
+        (job_id, filename, now, now, user_id),
     )
     conn.commit()
     conn.close()
@@ -79,23 +78,38 @@ def update_job(job_id: str, **kwargs) -> None:
     conn.close()
 
 
+_JOB_COLS = [
+    "job_id", "status", "pdf_filename", "total_images", "processed_images",
+    "skipped_images", "generated_images", "quiz_count", "export_path",
+    "html_export_path", "pdf_export_path", "error", "created_at", "updated_at", "user_id",
+]
+
+
 def get_job(job_id: str) -> Optional[dict]:
     conn = _connect()
     row = conn.execute("""
         SELECT job_id, status, pdf_filename, total_images, processed_images,
                skipped_images, generated_images, quiz_count, export_path,
-               html_export_path, pdf_export_path, error, created_at, updated_at
+               html_export_path, pdf_export_path, error, created_at, updated_at, user_id
         FROM jobs WHERE job_id = ?
     """, (job_id,)).fetchone()
     conn.close()
     if row is None:
         return None
-    cols = [
-        "job_id", "status", "pdf_filename", "total_images", "processed_images",
-        "skipped_images", "generated_images", "quiz_count", "export_path",
-        "html_export_path", "pdf_export_path", "error", "created_at", "updated_at",
-    ]
-    return dict(zip(cols, row))
+    return dict(zip(_JOB_COLS, row))
+
+
+def get_jobs_for_user(user_id: str) -> list[dict]:
+    conn = _connect()
+    rows = conn.execute("""
+        SELECT job_id, status, pdf_filename, total_images, processed_images,
+               skipped_images, generated_images, quiz_count, export_path,
+               html_export_path, pdf_export_path, error, created_at, updated_at, user_id
+        FROM jobs WHERE user_id = ?
+        ORDER BY created_at DESC LIMIT 50
+    """, (user_id,)).fetchall()
+    conn.close()
+    return [dict(zip(_JOB_COLS, row)) for row in rows]
 
 
 def get_queue_position(job_id: str) -> Optional[int]:
