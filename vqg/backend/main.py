@@ -2,11 +2,20 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
+from slowapi.util import get_remote_address
 
 from backend.config import EXPORTS_PATH, IMAGES_PATH, PROCESSED_PATH, UPLOADS_PATH
 from backend.models.db import init_db
 from backend.routes import export, jobs, preview, review, upload
+
+_ALLOWED_ORIGINS = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:3000"
+).split(",")
+
+limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="VQG — Visual Quiz Generator",
@@ -14,9 +23,13 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -26,9 +39,6 @@ app.include_router(jobs.router)
 app.include_router(export.router)
 app.include_router(preview.router)
 app.include_router(review.router)
-
-# Serve storage directory as static files (for HTML study guide diagrams)
-app.mount("/storage", StaticFiles(directory="storage"), name="storage")
 
 
 @app.on_event("startup")

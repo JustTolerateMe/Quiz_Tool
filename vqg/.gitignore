@@ -1,0 +1,13 @@
+.env
+*.env
+__pycache__/
+*.pyc
+*.pyo
+storage/
+venv/
+.next/
+node_modules/
+last_job_id.txt
+*.db
+*.db-shm
+*.db-wal
